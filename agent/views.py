@@ -85,19 +85,31 @@ def create_meeting_bot(request):
     api_key = getattr(settings, "ATTENDEE_API_KEY", "")
     agent_app_url = getattr(settings, "AGENT_APP_URL", "https://meeting-agent-web-production.up.railway.app")
 
-    # Step 1: Create the bot without audio URL to get bot_id
-    initial_payload = {
+    # websocket_settings can only be set at creation time.
+    # Strategy: create a stable session_id first, use it as the WS path,
+    # then create the bot with that URL embedded from the start.
+    import uuid as _uuid
+    session_id = str(_uuid.uuid4())
+    ws_url = f"wss://{bridge_domain}/audio/{session_id}"
+
+    bot_payload = {
         "meeting_url": meeting_url,
         "bot_name": bot_name,
         "google_meet_settings": {"use_login": True},
+        "websocket_settings": {
+            "audio": {
+                "url": ws_url,
+                "sample_rate": 16000,
+            }
+        },
     }
     if series_id:
-        initial_payload["metadata"] = {"series_id": series_id}
+        bot_payload["metadata"] = {"series_id": series_id}
 
     try:
         resp = req.post(
             f"{agent_app_url}/api/v1/bots",
-            json=initial_payload,
+            json=bot_payload,
             headers={"Authorization": f"Token {api_key}"},
             timeout=10,
         )
@@ -108,26 +120,8 @@ def create_meeting_bot(request):
         return JsonResponse({"error": str(exc)}, status=500)
 
     bot_id = bot_data.get("id", "")
-    if not bot_id:
-        return JsonResponse({"error": "no bot_id in response"}, status=500)
-
-    # Step 2: Patch with real audio bridge URL (contains bot_id)
-    ws_url = f"wss://{bridge_domain}/audio/{bot_id}"
-    try:
-        patch_resp = req.patch(
-            f"{agent_app_url}/api/v1/bots/{bot_id}/voice_agent",
-            json={"websocket_settings": {"audio": {"url": ws_url, "sample_rate": 16000}}},
-            headers={"Authorization": f"Token {api_key}"},
-            timeout=10,
-        )
-        if patch_resp.ok:
-            log.info("create_meeting_bot: patched bot %s with bridge %s", bot_id, ws_url)
-        else:
-            log.warning("create_meeting_bot: PATCH failed (%s) — bot will record without live audio", patch_resp.status_code)
-    except Exception:
-        log.exception("create_meeting_bot: PATCH failed — bot will record without live audio")
-
-    return JsonResponse({**bot_data, "bridge_url": ws_url})
+    log.info("create_meeting_bot: bot %s created, bridge session %s at %s", bot_id, session_id, ws_url)
+    return JsonResponse({**bot_data, "bridge_url": ws_url, "bridge_session_id": session_id})
 
 
 @csrf_exempt
