@@ -18,20 +18,21 @@ from django.views.decorators.http import require_POST
 log = logging.getLogger("agent.views")
 
 
-def _verify_webhook_signature(request_body: bytes, signature_header: str, secret_bytes: bytes) -> bool:
+def _verify_webhook_signature(payload_dict: dict, signature_header: str, secret_bytes: bytes) -> bool:
     """
     Verify Attendee webhook signature.
-    Attendee signs canonical JSON of the full payload with HMAC-SHA256,
-    then base64-encodes the result. Header: X-Webhook-Signature.
+    Attendee signs canonical JSON (sort_keys=True, no spaces) of the full webhook_data dict,
+    then base64-encodes the HMAC-SHA256 result.
+    Header: X-Webhook-Signature.
+    See bots/webhook_utils.py:sign_payload for the exact implementation.
     """
     if not secret_bytes or not signature_header:
         return False
 
-    # The body is already the canonical JSON we need to sign
-    # Attendee signs json.dumps(payload, sort_keys=True, separators=(',', ':'))
-    # which is exactly what was POSTed to us
+    # Reconstruct canonical JSON exactly as Attendee does in sign_payload()
+    canonical = json.dumps(payload_dict, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     expected = base64.b64encode(
-        hmac.new(secret_bytes, request_body, hashlib.sha256).digest()
+        hmac.new(secret_bytes, canonical.encode("utf-8"), hashlib.sha256).digest()
     ).decode("utf-8")
 
     return hmac.compare_digest(signature_header, expected)
@@ -91,7 +92,7 @@ def attendee_webhook(request):
     if bot_id:
         secret_bytes = _get_project_secret(bot_id)
         if secret_bytes:
-            if not _verify_webhook_signature(request.body, sig_header, secret_bytes):
+            if not _verify_webhook_signature(payload, sig_header, secret_bytes):
                 log.warning(
                     "attendee_webhook: invalid signature for bot %s from %s",
                     bot_id, request.META.get("REMOTE_ADDR"),
@@ -108,6 +109,7 @@ def attendee_webhook(request):
     # Dispatch by trigger type
     if trigger == "bot.state_change":
         new_state = data.get("new_state", "")
+        # Fire when the bot reaches ended state (after post_processing completes)
         if new_state == "ended" and bot_id:
             from .tasks import process_finished_meeting
             process_finished_meeting.delay(bot_id=bot_id)
