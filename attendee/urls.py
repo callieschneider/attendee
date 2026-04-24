@@ -58,6 +58,7 @@ if not os.environ.get("DISABLE_ADMIN"):
     urlpatterns.append(path("admin/", admin.site.urls))
 
 urlpatterns += [
+    path("agent/", include("agent.urls")),
     path("accounts/", include("allauth.urls")),
     path("accounts/", include("allauth.socialaccount.urls")),
     path("external_webhooks/", include("bots.external_webhooks_urls", namespace="external_webhooks")),
