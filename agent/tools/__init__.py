@@ -6,13 +6,13 @@ auto-registered here. Ported from abstraKt's tools/index.ts pattern.
 import logging
 
 from .types import ToolDefinition
-from . import meetings, series, tasks, artifacts, search
+from . import meetings, series, tasks, artifacts, search, utility
 
 log = logging.getLogger("agent.tools")
 
 TOOL_REGISTRY: dict[str, ToolDefinition] = {}
 
-for _mod in (meetings, series, tasks, artifacts, search):
+for _mod in (meetings, series, tasks, artifacts, search, utility):
     for _tool in getattr(_mod, "TOOLS", []):
         if _tool.name in TOOL_REGISTRY:
             raise RuntimeError(f"Duplicate tool name registered: {_tool.name!r}")
