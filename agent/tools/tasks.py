@@ -36,18 +36,14 @@ def _list_tasks(inp: dict, ctx: dict) -> dict:
 
 
 def _create_task(inp: dict, ctx: dict) -> dict:
-    from agent.models import Task, MeetingSeries
+    from agent.models import Task
 
-    series_id = inp.get("series_id") or ctx.get("series_id")
-    if not series_id:
-        return {"error": "series_id required"}
-    try:
-        series = MeetingSeries.objects.get(id=series_id)
-    except MeetingSeries.DoesNotExist:
-        return {"error": f"series {series_id} not found"}
+    from ._series_fallback import ensure_series_id
+
+    series_id = ensure_series_id(inp, ctx)
 
     task = Task.objects.create(
-        series=series,
+        series_id=series_id,
         title=inp.get("title", "")[:512],
         description=inp.get("description", ""),
         priority=inp.get("priority", "medium"),

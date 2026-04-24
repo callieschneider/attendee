@@ -55,18 +55,14 @@ def _search_artifacts(inp: dict, ctx: dict) -> dict:
 
 
 def _create_artifact(inp: dict, ctx: dict) -> dict:
-    from agent.models import Artifact, MeetingSeries
+    from agent.models import Artifact
 
-    series_id = inp.get("series_id") or ctx.get("series_id")
-    if not series_id:
-        return {"error": "series_id required"}
-    try:
-        series = MeetingSeries.objects.get(id=series_id)
-    except MeetingSeries.DoesNotExist:
-        return {"error": f"series {series_id} not found"}
+    from ._series_fallback import ensure_series_id
+
+    series_id = ensure_series_id(inp, ctx)
 
     art = Artifact.objects.create(
-        series=series,
+        series_id=series_id,
         title=inp.get("title", "Untitled")[:255],
         type=inp.get("type", "note"),
         content=inp.get("content", ""),
@@ -82,7 +78,12 @@ def _create_artifact(inp: dict, ctx: dict) -> dict:
         text=f"{art.title}\n\n{art.content}",
     )
 
-    return {"created": True, "artifact_id": str(art.id), "title": art.title}
+    return {
+        "created": True,
+        "artifact_id": str(art.id),
+        "title": art.title,
+        "series_id": series_id,
+    }
 
 
 def _get_artifact(inp: dict, ctx: dict) -> dict:

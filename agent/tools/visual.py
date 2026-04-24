@@ -18,14 +18,13 @@ log = logging.getLogger("agent.tools.visual")
 def _create_visual(inp: dict, ctx: dict) -> dict:
     from agent.models import Artifact
 
-    series_id = ctx.get("series_id")
-    if not series_id:
-        return {"error": "series_id required (pass via context or create_artifact-equivalent)"}
+    from ._series_fallback import ensure_series_id
 
     spec = inp.get("spec")
     if not isinstance(spec, dict):
         return {"error": "spec must be an object (dict)"}
     title = (inp.get("title") or "Visual").strip()
+    series_id = ensure_series_id(inp, ctx)
 
     try:
         artifact = Artifact.objects.create(
@@ -38,7 +37,12 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
         log.exception("create_visual: failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
 
-    return {"visual_id": str(artifact.id), "url": "", "status": "pending_render"}
+    return {
+        "visual_id": str(artifact.id),
+        "url": "",
+        "status": "pending_render",
+        "series_id": series_id,
+    }
 
 
 def _update_visual(inp: dict, ctx: dict) -> dict:

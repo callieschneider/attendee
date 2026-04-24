@@ -116,22 +116,18 @@ def _save_artifact_from_url(inp: dict, ctx: dict) -> dict:
     """Fetch a URL and save it as an Artifact in the current series."""
     import re
     import requests as req
-    from agent.models import Artifact, MeetingSeries, MeetingOccurrence
+    from agent.models import Artifact, MeetingOccurrence
     from agent.tasks import embed_entity_async
 
+    from ._series_fallback import ensure_series_id
+
     url = inp.get("url", "").strip()
-    series_id = inp.get("series_id") or ctx.get("series_id")
     title = inp.get("title", "").strip()
 
     if not url:
         return {"error": "url required"}
-    if not series_id:
-        return {"error": "series_id required"}
 
-    try:
-        series = MeetingSeries.objects.get(id=series_id)
-    except MeetingSeries.DoesNotExist:
-        return {"error": f"series {series_id} not found"}
+    series_id = ensure_series_id(inp, ctx)
 
     # Fetch the page
     fetch_result = _fetch_url({"url": url}, ctx)
@@ -146,7 +142,7 @@ def _save_artifact_from_url(inp: dict, ctx: dict) -> dict:
         title = title_match.group(1).strip() if title_match else url[:80]
 
     art = Artifact.objects.create(
-        series=series,
+        series_id=series_id,
         title=title[:255],
         type="link",
         content=content[:8000],
