@@ -1,0 +1,53 @@
+{% extends "agent/_base.html" %}
+{% block title %}Dashboard — Meeting Agent{% endblock %}
+{% block content %}
+
+<h2>Active meetings</h2>
+<table>
+  <tr><th>Bot</th><th>Gate</th><th>Cost</th><th>Cursor</th><th>Last turn</th><th></th></tr>
+  {% for c in active_cursors %}
+  <tr>
+    <td class="mono">{{ c.bot_id }}</td>
+    <td>
+      {% if c.audio_gate_open %}<span class="pill warn">OPEN ({{ c.audio_gate_reason }})</span>
+      {% else %}<span class="pill muted">closed</span>{% endif %}
+    </td>
+    <td class="mono">${{ c.total_cost_usd|floatformat:4 }} / ${{ c.budget_cap_usd }}</td>
+    <td class="mono">{{ c.cursor_event_time|default_if_none:"—" }}</td>
+    <td class="mono">{{ c.last_turn_at|default_if_none:"—" }}</td>
+    <td><a href="{% url 'agent:dashboard_meeting' c.bot_id %}">live →</a></td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="6" style="color:var(--muted)">No active meetings.</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Recent meeting occurrences</h2>
+<table>
+  <tr><th>Series</th><th>Title</th><th>Started</th><th>Bot</th></tr>
+  {% for occ in recent_occurrences %}
+  <tr>
+    <td>{{ occ.series.title }}</td>
+    <td>{{ occ.title|default:"—" }}</td>
+    <td class="mono">{{ occ.started_at|default_if_none:"—" }}</td>
+    <td class="mono">{% if occ.bot_id %}<a href="{% url 'agent:dashboard_meeting' occ.bot_id %}">{{ occ.bot_id }}</a>{% else %}—{% endif %}</td>
+  </tr>
+  {% empty %}
+  <tr><td colspan="4" style="color:var(--muted)">Nothing yet.</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Series</h2>
+<table>
+  <tr><th>Title</th><th>Verbosity</th><th>Proactivity</th><th>Budget/meeting</th></tr>
+  {% for s in series_list %}
+  <tr>
+    <td><a href="/admin/agent/meetingseries/{{ s.id }}/change/">{{ s.title }}</a></td>
+    <td><span class="pill muted">{{ s.agent_verbosity }}</span></td>
+    <td><span class="pill muted">{{ s.agent_proactivity }}</span></td>
+    <td class="mono">{% if s.max_cost_usd_per_meeting %}${{ s.max_cost_usd_per_meeting }}{% else %}default{% endif %}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+{% endblock %}

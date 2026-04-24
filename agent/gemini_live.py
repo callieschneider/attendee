@@ -15,34 +15,79 @@ log = logging.getLogger("agent.gemini_live")
 AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
 
 
-def build_live_setup(system_prompt: str, voice: str = "Zephyr") -> dict:
+_LIVE_READ_ONLY_TOOL_NAMES = {
+    "get_recent_occurrences",
+    "get_occurrence_transcript",
+    "get_meeting_notes",
+    "list_upcoming_meetings",
+    "get_series_context_bundle",
+    "list_series",
+    "list_tasks",
+    "search_artifacts",
+    "get_artifact",
+    "semantic_search",
+    "web_search",
+    "fetch_url",
+    "read_recent_chat",
+}
+
+
+def _gather_tool_schemas_for_gemini_live() -> list[dict]:
+    """
+    Only READ-ONLY tools are exposed directly to Gemini Live. All mutating
+    tools go through the Turn Processor to preserve ActionLogEntry integrity.
+    See plan §11 (Landmines / tool split).
+    """
+    return [
+        to_gemini_declaration(t)
+        for name, t in TOOL_REGISTRY.items()
+        if name in _LIVE_READ_ONLY_TOOL_NAMES
+    ]
+
+
+def build_live_setup(
+    system_prompt: str,
+    voice: str = "Zephyr",
+    session_resumption_handle: str | None = None,
+    enable_transcriptions: bool = True,
+) -> dict:
     """
     Build the bidiGenerateContentSetup message.
     This is sent as the first frame when opening a Gemini Live WebSocket.
+
+    Optional `session_resumption_handle` lets us reopen an existing session
+    transparently after the ~10-minute cap (the value comes from Gemini's
+    own sessionResumptionUpdate messages).
     """
     model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 
-    tool_declarations = [to_gemini_declaration(t) for t in TOOL_REGISTRY.values()]
+    tool_declarations = _gather_tool_schemas_for_gemini_live()
 
-    return {
-        "setup": {
-            "model": f"models/{model}",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": {"voiceName": voice}
-                    }
-                },
+    setup: dict = {
+        "model": f"models/{model}",
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
             },
-            # Gemini Live handles VAD and interrupts natively when audio is streamed
-            # continuously — no explicit config needed for v1alpha.
-            "systemInstruction": {
-                "parts": [{"text": system_prompt}]
-            },
-            "tools": [{"functionDeclarations": tool_declarations}],
-        }
+        },
+        # Gemini Live handles VAD and interrupts natively when audio is streamed
+        # continuously — no explicit config needed for v1alpha.
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "tools": [{"functionDeclarations": tool_declarations}] if tool_declarations else [],
     }
+
+    # Session resumption — always included so Gemini tells us the handle
+    setup["sessionResumption"] = (
+        {"handle": session_resumption_handle} if session_resumption_handle else {}
+    )
+
+    # Native transcriptions (useful for verification + debugging)
+    if enable_transcriptions:
+        setup["inputAudioTranscription"] = {}
+        setup["outputAudioTranscription"] = {}
+
+    return {"setup": setup}
 
 
 def mint_ephemeral_token(setup_msg: dict, ttl_seconds: int = 1800) -> dict:

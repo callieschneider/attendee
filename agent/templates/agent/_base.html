@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>{% block title %}Meeting Agent{% endblock %}</title>
+<style>
+ :root {
+  --bg:#0b0c0f; --fg:#e5e7eb; --muted:#6b7280; --accent:#4ade80; --warn:#f59e0b; --err:#f87171;
+ }
+ body { background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system, Segoe UI, sans-serif; margin:0; padding:24px; }
+ h1, h2 { font-weight:600; }
+ a { color:#60a5fa; text-decoration:none; }
+ a:hover { text-decoration:underline; }
+ header { display:flex; justify-content:space-between; border-bottom:1px solid #1f2937; padding-bottom:12px; margin-bottom:20px; }
+ header nav a { margin-left:18px; }
+ table { border-collapse:collapse; width:100%; margin:8px 0 20px; }
+ th, td { text-align:left; padding:6px 10px; border-bottom:1px solid #1f2937; font-size:13px; }
+ th { color:var(--muted); font-weight:500; }
+ .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; }
+ .pill.ok { background:#065f46; color:#a7f3d0; }
+ .pill.err { background:#7f1d1d; color:#fecaca; }
+ .pill.warn { background:#78350f; color:#fde68a; }
+ .pill.muted { background:#1f2937; color:#9ca3af; }
+ .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+ .card { background:#111318; border:1px solid #1f2937; border-radius:8px; padding:14px; }
+ code { background:#1f2937; padding:2px 6px; border-radius:4px; font-size:12px; }
+ .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+ .scroll { max-height:70vh; overflow-y:auto; }
+ .ev { border-bottom:1px solid #1f2937; padding:6px 0; font-size:13px; }
+ .ev .t { color:var(--muted); margin-right:8px; }
+ .ev .sp { color:#93c5fd; }
+ .ev.chat .sp { color:#f9a8d4; }
+ form.inline { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+ input, select, textarea { background:#111318; color:var(--fg); border:1px solid #1f2937; padding:6px 8px; border-radius:4px; font:inherit; }
+ button { background:#374151; color:var(--fg); border:1px solid #4b5563; padding:6px 14px; border-radius:4px; cursor:pointer; }
+ button:hover { background:#4b5563; }
+</style>
+</head>
+<body>
+<header>
+  <h1><a href="{% url 'agent:dashboard_home' %}" style="color:inherit">Meeting Agent</a> <span style="color:var(--muted);font-size:14px">dashboard</span></h1>
+  <nav>
+    <a href="{% url 'agent:dashboard_home' %}">Home</a>
+    <a href="{% url 'agent:dashboard_series_list' %}">Series</a>
+    <a href="/admin/">Admin</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+</body>
+</html>

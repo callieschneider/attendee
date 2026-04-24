@@ -1,0 +1,109 @@
+{% extends "agent/_base.html" %}
+{% block title %}Meeting {{ bot_id }} — Live{% endblock %}
+{% block content %}
+
+<h2>Meeting {{ bot_id }}</h2>
+{% if cursor %}
+<div class="card" style="margin-bottom:16px">
+  <b>Cursor:</b> {{ cursor.cursor_event_time|default_if_none:"—" }}
+  &nbsp;|&nbsp; <b>Last turn:</b> {{ cursor.last_turn_at|default_if_none:"—" }}
+  &nbsp;|&nbsp; <b>Cost:</b> ${{ cursor.total_cost_usd|floatformat:4 }} / ${{ cursor.budget_cap_usd }}
+  &nbsp;|&nbsp; <b>Gate:</b>
+  {% if cursor.audio_gate_open %}<span class="pill warn">OPEN ({{ cursor.audio_gate_reason }})</span>
+  {% else %}<span class="pill muted">closed</span>{% endif %}
+</div>
+{% else %}
+<p style="color:var(--muted)">No cursor yet — bot hasn't produced any transcript events.</p>
+{% endif %}
+
+<div class="grid">
+  <div class="card">
+    <h2 style="margin-top:0">Live transcript</h2>
+    <div id="transcript" class="scroll">
+      {% for e in events %}
+      <div class="ev {{ e.kind }}">
+        <span class="t mono">{{ e.event_time|time:"H:i:s" }}</span>
+        {% if e.kind != "speech" %}<span class="pill muted">{{ e.kind }}</span>{% endif %}
+        <span class="sp">{{ e.speaker|default:"?" }}</span>: {{ e.text }}
+      </div>
+      {% empty %}
+      <div style="color:var(--muted)">Waiting for events…</div>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="card">
+    <h2 style="margin-top:0">Agent actions</h2>
+    <div id="actions" class="scroll">
+      {% for a in actions %}
+      <div class="ev">
+        <span class="t mono">{{ a.created_at|time:"H:i:s" }}</span>
+        <code>{{ a.tool_name }}</code>
+        {% if a.status == "ok" %}<span class="pill ok">ok</span>
+        {% elif a.status == "error" %}<span class="pill err">err</span>
+        {% else %}<span class="pill muted">{{ a.status }}</span>{% endif %}
+        {% if a.latency_ms %}<span style="color:var(--muted)">{{ a.latency_ms }}ms</span>{% endif %}
+        {% if a.error_message %}<div style="color:var(--err); font-size:12px">{{ a.error_message|truncatechars:120 }}</div>{% endif %}
+      </div>
+      {% empty %}
+      <div style="color:var(--muted)">No actions yet.</div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const transcriptEl = document.getElementById('transcript');
+  const actionsEl = document.getElementById('actions');
+  const streamUrl = "{% url 'agent:dashboard_meeting_stream' bot_id %}";
+  let source;
+  try { source = new EventSource(streamUrl); }
+  catch (e) { console.warn('SSE not available; fallback to polling'); return startPolling(); }
+
+  source.addEventListener('transcript', (ev) => {
+    const rows = JSON.parse(ev.data);
+    rows.forEach(r => appendEvent(transcriptEl, renderEvent(r)));
+  });
+  source.addEventListener('action', (ev) => {
+    const rows = JSON.parse(ev.data);
+    rows.forEach(r => appendEvent(actionsEl, renderAction(r)));
+  });
+  source.addEventListener('heartbeat', () => {});
+  source.onerror = () => { console.warn('SSE error'); source.close(); startPolling(); };
+
+  function renderEvent(r) {
+    const t = r.event_time ? r.event_time.substring(11, 19) : '--:--:--';
+    const kindLabel = r.kind !== 'speech' ? `<span class="pill muted">${escape(r.kind)}</span> ` : '';
+    return `<div class="ev ${escape(r.kind)}"><span class="t mono">${escape(t)}</span> ${kindLabel}<span class="sp">${escape(r.speaker || '?')}</span>: ${escape(r.text || '')}</div>`;
+  }
+  function renderAction(a) {
+    const t = a.created_at ? a.created_at.substring(11, 19) : '--:--:--';
+    const pill = a.status === 'ok' ? 'ok' : a.status === 'error' ? 'err' : 'muted';
+    const err = a.error_message ? `<div style="color:var(--err);font-size:12px">${escape(a.error_message)}</div>` : '';
+    return `<div class="ev"><span class="t mono">${escape(t)}</span> <code>${escape(a.tool_name)}</code> <span class="pill ${pill}">${escape(a.status)}</span> ${a.latency_ms ? `<span style="color:var(--muted)">${a.latency_ms}ms</span>` : ''}${err}</div>`;
+  }
+  function appendEvent(el, html) {
+    const placeholder = el.querySelector('[data-empty]');
+    if (placeholder) placeholder.remove();
+    const div = document.createElement('div');
+    div.innerHTML = html;
+    el.appendChild(div.firstChild);
+    el.scrollTop = el.scrollHeight;
+  }
+  function escape(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  async function startPolling() {
+    const url = "{% url 'agent:dashboard_meeting_events_json' bot_id %}";
+    while (true) {
+      try {
+        const r = await fetch(url);
+        const j = await r.json();
+        transcriptEl.innerHTML = j.events.map(renderEvent).reverse().join('');
+        actionsEl.innerHTML = j.actions.map(renderAction).reverse().join('');
+      } catch (e) { console.warn(e); }
+      await new Promise(r => setTimeout(r, 2500));
+    }
+  }
+})();
+</script>
+{% endblock %}

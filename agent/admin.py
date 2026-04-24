@@ -2,10 +2,12 @@ from django.contrib import admin
 from django.contrib import messages
 
 from .models import (
+    ActionLogEntry,
     Artifact,
     Conversation,
     ContextItem,
     EmbeddingChunk,
+    MeetingCursor,
     MeetingOccurrence,
     MeetingSeries,
     MeetingTask,
@@ -13,6 +15,8 @@ from .models import (
     ProjectIntelligence,
     SeriesRule,
     Task,
+    TranscriptEvent,
+    VoiceContextPush,
 )
 
 
@@ -24,9 +28,33 @@ class SeriesRuleInline(admin.TabularInline):
 
 @admin.register(MeetingSeries)
 class MeetingSeriesAdmin(admin.ModelAdmin):
-    list_display = ("title", "is_active", "google_calendar_id", "created_at")
-    list_filter = ("is_active",)
+    list_display = (
+        "title",
+        "is_active",
+        "agent_verbosity",
+        "agent_proactivity",
+        "max_cost_usd_per_meeting",
+        "google_calendar_id",
+        "created_at",
+    )
+    list_filter = ("is_active", "agent_verbosity", "agent_proactivity")
     search_fields = ("title", "description")
+    fieldsets = (
+        (None, {"fields": ("title", "description", "tags", "is_active")}),
+        ("Calendar", {"fields": ("rrule", "google_calendar_id", "attendee_calendar_id")}),
+        (
+            "Agent behavior",
+            {
+                "fields": (
+                    "agent_name_override",
+                    "agent_verbosity",
+                    "agent_proactivity",
+                    "allowed_tool_categories",
+                    "max_cost_usd_per_meeting",
+                )
+            },
+        ),
+    )
     inlines = [SeriesRuleInline]
 
 
@@ -123,3 +151,58 @@ class MessageAdmin(admin.ModelAdmin):
     list_display = ("role", "conversation", "tool_name", "created_at")
     list_filter = ("role",)
     search_fields = ("content", "tool_name")
+
+
+# ── Phase 5 admin registrations ────────────────────────────────────────────────
+
+
+@admin.register(TranscriptEvent)
+class TranscriptEventAdmin(admin.ModelAdmin):
+    list_display = ("event_time", "bot", "kind", "speaker", "short_text", "created_at")
+    list_filter = ("kind",)
+    search_fields = ("text", "speaker", "utterance_ref")
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("bot", "occurrence")
+
+    def short_text(self, obj):
+        return (obj.text or "")[:80]
+
+    short_text.short_description = "text"
+
+
+@admin.register(ActionLogEntry)
+class ActionLogEntryAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "bot", "tool_name", "status", "latency_ms", "is_archived")
+    list_filter = ("status", "tool_name", "is_archived")
+    search_fields = ("tool_name", "error_message")
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("bot", "occurrence", "trigger_start_event", "trigger_end_event")
+
+
+@admin.register(VoiceContextPush)
+class VoiceContextPushAdmin(admin.ModelAdmin):
+    list_display = ("created_at", "bot", "short_text", "triggered_by_turn_id")
+    search_fields = ("text", "session_handle")
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("bot",)
+
+    def short_text(self, obj):
+        return (obj.text or "")[:80]
+
+    short_text.short_description = "text"
+
+
+@admin.register(MeetingCursor)
+class MeetingCursorAdmin(admin.ModelAdmin):
+    list_display = (
+        "bot",
+        "cursor_event_time",
+        "last_turn_at",
+        "audio_gate_open",
+        "total_cost_usd",
+        "budget_cap_usd",
+        "budget_exceeded",
+    )
+    list_filter = ("audio_gate_open", "budget_exceeded")
+    readonly_fields = ("created_at", "updated_at")
+    raw_id_fields = ("bot",)

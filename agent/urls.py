@@ -1,4 +1,4 @@
-from django.urls import path
+from django.urls import include, path
 
 from . import views
 
@@ -18,4 +18,7 @@ urlpatterns = [
     # Google Calendar OAuth flow
     path("api/calendar/connect", views.calendar_connect, name="calendar_connect"),
     path("api/calendar/callback", views.calendar_callback, name="calendar_callback"),
+
+    # Phase 5 live-meeting dashboard
+    path("dashboard/", include("agent.dashboard.urls")),
 ]

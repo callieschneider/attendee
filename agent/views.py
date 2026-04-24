@@ -187,8 +187,22 @@ def attendee_webhook(request):
         return JsonResponse({"ok": True, "ignored": f"state={new_state}"})
 
     elif trigger == "transcript.update":
-        # Phase 2 — realtime transcript forwarding to Gemini Live
-        return JsonResponse({"ok": True, "ignored": "transcript.update (Phase 2)"})
+        from .ingestion import ingest_transcript_update
+        try:
+            result = ingest_transcript_update(bot_id, data)
+        except Exception:
+            log.exception("attendee_webhook: transcript.update ingestion failed")
+            return JsonResponse({"error": "ingestion failed"}, status=500)
+        return JsonResponse({"ok": True, **result})
+
+    elif trigger == "chat_messages.update":
+        from .ingestion import ingest_chat_message
+        try:
+            result = ingest_chat_message(bot_id, data)
+        except Exception:
+            log.exception("attendee_webhook: chat_messages.update ingestion failed")
+            return JsonResponse({"error": "ingestion failed"}, status=500)
+        return JsonResponse({"ok": True, **result})
 
     elif trigger == "calendar.events_update":
         # Calendar sync completed — find and schedule upcoming events

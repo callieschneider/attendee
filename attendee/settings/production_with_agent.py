@@ -22,6 +22,16 @@ AGENT_SUMMARIZER_MODEL = os.getenv("AGENT_SUMMARIZER_MODEL", "gemini-2.5-flash")
 AGENT_LIVE_MODEL = os.getenv("AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 AGENT_DEFAULT_VOICE = os.getenv("AGENT_DEFAULT_VOICE", "Zephyr")
 
+# ---- Phase 5 agent core rewrite ----
+AGENT_NAME = os.getenv("AGENT_NAME", "Clever Star")
+AGENT_TURN_MODEL = os.getenv("AGENT_TURN_MODEL", "gemini-2.5-flash")
+AGENT_CLASSIFIER_MODEL = os.getenv("AGENT_CLASSIFIER_MODEL", "gemini-2.5-flash-lite")
+AGENT_TURN_WINDOW_SECONDS = float(os.getenv("AGENT_TURN_WINDOW_SECONDS", "8"))
+AGENT_PAUSE_THRESHOLD_SECONDS = float(os.getenv("AGENT_PAUSE_THRESHOLD_SECONDS", "2.0"))
+AGENT_MAX_TURN_BUDGET_USD = float(os.getenv("AGENT_MAX_TURN_BUDGET_USD", "10.00"))
+AGENT_SEMANTIC_TOKEN_BUDGET = int(os.getenv("AGENT_SEMANTIC_TOKEN_BUDGET", "10500"))
+AGENT_MMR_LAMBDA = float(os.getenv("AGENT_MMR_LAMBDA", "0.7"))
+
 # Agent tasks run on the default 'celery' queue — same worker handles everything.
 
 # ---- Attendee webhook secret (for HMAC verification) ----

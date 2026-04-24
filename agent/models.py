@@ -14,6 +14,13 @@ from pgvector.django import VectorField
 class MeetingSeries(models.Model):
     """A recurring meeting series or project — the top-level grouping concept."""
 
+    AGENT_VERBOSITY_CHOICES = [("terse", "Terse"), ("normal", "Normal"), ("chatty", "Chatty")]
+    AGENT_PROACTIVITY_CHOICES = [
+        ("silent", "Silent"),
+        ("reactive", "Reactive"),
+        ("proactive", "Proactive"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -27,6 +34,36 @@ class MeetingSeries(models.Model):
     rrule = models.CharField(max_length=512, blank=True, default="")
     google_calendar_id = models.CharField(max_length=255, blank=True, default="")
     attendee_calendar_id = models.CharField(max_length=64, blank=True, default="")
+
+    # Phase 5: per-series agent behavior overrides
+    agent_name_override = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Override the default agent name for this series. Blank = use global AGENT_NAME.",
+    )
+    agent_verbosity = models.CharField(
+        max_length=16, choices=AGENT_VERBOSITY_CHOICES, default="normal"
+    )
+    agent_proactivity = models.CharField(
+        max_length=16, choices=AGENT_PROACTIVITY_CHOICES, default="reactive"
+    )
+    allowed_tool_categories = ArrayField(
+        models.CharField(max_length=32),
+        default=list,
+        blank=True,
+        help_text=(
+            "Empty list = all categories allowed. Categories: meetings, series, tasks, "
+            "artifacts, search, utility, voice, chat, visual."
+        ),
+    )
+    max_cost_usd_per_meeting = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Per-meeting USD budget cap. Null = use AGENT_MAX_TURN_BUDGET_USD default.",
+    )
 
     class Meta:
         db_table = "agent_meeting_series"
@@ -392,3 +429,211 @@ class SeriesRule(models.Model):
 
     def __str__(self):
         return f"{self.rule_type}:{self.rule_value} → {self.series.title}"
+
+
+# ── Phase 5: agent core rewrite — durable meeting state ────────────────────────
+
+
+class TranscriptEvent(models.Model):
+    """
+    Append-only log of everything that happens in a live meeting.
+    Speech utterances, chat messages, agent action markers, and system events
+    all flow into this timeline so the Turn Processor can operate on a single
+    durable stream.
+    """
+
+    KIND_CHOICES = [
+        ("speech", "Speech utterance"),
+        ("chat", "Meet chat message"),
+        ("action", "Agent action marker (details in ActionLogEntry)"),
+        ("system", "System event (bot joined/left, gate change, etc.)"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    bot = models.ForeignKey(
+        "bots.Bot",
+        on_delete=models.CASCADE,
+        to_field="object_id",
+        related_name="transcript_events",
+        db_index=True,
+    )
+    occurrence = models.ForeignKey(
+        "MeetingOccurrence",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="transcript_events",
+    )
+
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES, db_index=True)
+    event_time = models.DateTimeField(db_index=True)
+
+    speaker = models.CharField(max_length=255, blank=True, default="")
+    speaker_uuid = models.CharField(max_length=255, blank=True, default="")
+    text = models.TextField(blank=True, default="")
+    raw = models.JSONField(default=dict, blank=True)
+    utterance_ref = models.CharField(max_length=128, blank=True, default="")
+
+    class Meta:
+        db_table = "agent_transcript_event"
+        ordering = ["event_time", "created_at"]
+        indexes = [
+            models.Index(fields=["bot", "event_time"]),
+            models.Index(fields=["bot", "kind", "event_time"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["bot", "utterance_ref"],
+                condition=models.Q(utterance_ref__gt=""),
+                name="unique_transcript_event_utterance_ref_per_bot",
+            ),
+        ]
+        verbose_name = "Transcript Event"
+
+    def __str__(self):
+        ts = self.event_time.strftime("%H:%M:%S") if self.event_time else "??"
+        preview = (self.text or "").replace("\n", " ")[:60]
+        return f"{self.kind}@{ts} {self.speaker}: {preview}"
+
+
+class ActionLogEntry(models.Model):
+    """
+    One row per tool call made by the Turn Processor during a meeting.
+    Provides the agent with durable memory of "what I have already done"
+    across turns and across session drops.
+    """
+
+    STATUS_CHOICES = [("pending", "Pending"), ("ok", "OK"), ("error", "Error")]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    bot = models.ForeignKey(
+        "bots.Bot",
+        on_delete=models.CASCADE,
+        to_field="object_id",
+        related_name="action_log",
+    )
+    occurrence = models.ForeignKey(
+        "MeetingOccurrence",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="action_log",
+    )
+    turn_id = models.UUIDField(db_index=True)
+
+    tool_name = models.CharField(max_length=128, db_index=True)
+    tool_input = models.JSONField(default=dict)
+    tool_result = models.JSONField(default=dict, blank=True)
+
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default="pending")
+    latency_ms = models.IntegerField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default="")
+
+    # Horizon summarization — allow compressing old entries into synthetic rows
+    is_archived = models.BooleanField(default=False, db_index=True)
+
+    # What transcript event range triggered this action (for replay / debug)
+    trigger_start_event = models.ForeignKey(
+        "TranscriptEvent",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    trigger_end_event = models.ForeignKey(
+        "TranscriptEvent",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+
+    class Meta:
+        db_table = "agent_action_log_entry"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["bot", "created_at"]),
+            models.Index(fields=["turn_id"]),
+        ]
+        verbose_name = "Action Log Entry"
+        verbose_name_plural = "Action Log Entries"
+
+    def __str__(self):
+        return f"{self.tool_name} [{self.status}] @ {self.created_at:%H:%M:%S}"
+
+
+class VoiceContextPush(models.Model):
+    """
+    Audit log of text briefings pushed into Gemini Live via realtimeInput.text.
+    Lets us debug "did the voice agent know about X?" after the fact.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    bot = models.ForeignKey(
+        "bots.Bot",
+        on_delete=models.CASCADE,
+        to_field="object_id",
+        related_name="voice_context_pushes",
+    )
+    session_handle = models.CharField(max_length=512, blank=True, default="")
+    text = models.TextField()
+    triggered_by_turn_id = models.UUIDField(null=True, blank=True)
+
+    class Meta:
+        db_table = "agent_voice_context_push"
+        ordering = ["-created_at"]
+        verbose_name = "Voice Context Push"
+
+    def __str__(self):
+        return f"{self.bot_id} @ {self.created_at:%H:%M:%S}: {self.text[:60]}"
+
+
+class MeetingCursor(models.Model):
+    """
+    Live meeting state snapshot — one row per active bot.
+    Holds the transcript cursor, voice session handle, audio gate state,
+    and cost tracking. Purgeable after meeting ends.
+    """
+
+    bot = models.OneToOneField(
+        "bots.Bot",
+        to_field="object_id",
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="agent_cursor",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # Transcript cursor (inclusive — last event processed)
+    cursor_event_time = models.DateTimeField(null=True, blank=True)
+    cursor_event_created_at = models.DateTimeField(null=True, blank=True)
+    last_turn_id = models.UUIDField(null=True, blank=True)
+    last_turn_at = models.DateTimeField(null=True, blank=True)
+
+    # Voice session state
+    voice_session_handle = models.CharField(max_length=512, blank=True, default="")
+    voice_session_opened_at = models.DateTimeField(null=True, blank=True)
+
+    # Audio gate state
+    audio_gate_open = models.BooleanField(default=False)
+    audio_gate_opened_at = models.DateTimeField(null=True, blank=True)
+    audio_gate_reason = models.CharField(max_length=64, blank=True, default="")
+
+    # Cost tracking
+    total_cost_usd = models.DecimalField(max_digits=10, decimal_places=4, default=0)
+    budget_cap_usd = models.DecimalField(max_digits=10, decimal_places=2, default=10)
+    budget_exceeded = models.BooleanField(default=False)
+
+    class Meta:
+        db_table = "agent_meeting_cursor"
+        verbose_name = "Meeting Cursor"
+
+    def __str__(self):
+        return f"cursor bot={self.bot_id} turn={self.last_turn_id}"
