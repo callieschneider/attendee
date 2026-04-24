@@ -91,20 +91,22 @@ def _summarize_entries(entries: list) -> str:
     )
 
     try:
-        import google.generativeai as genai
+        from agent.llm_client import chat_completion
 
-        api_key = getattr(settings, "GOOGLE_API_KEY", "")
-        if not api_key:
-            log.warning("horizon: GOOGLE_API_KEY not configured")
-            return ""
-        genai.configure(api_key=api_key)
-        model_name = getattr(settings, "AGENT_SUMMARIZER_MODEL", "gemini-2.5-flash")
-        model = genai.GenerativeModel(model_name)
-        resp = model.generate_content(
-            prompt,
-            generation_config={"max_output_tokens": 256, "temperature": 0.2},
+        model_name = getattr(
+            settings, "AGENT_SUMMARIZER_MODEL", "google/gemini-2.5-flash"
         )
-        return (resp.text or "").strip()
+        result = chat_completion(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=256,
+            timeout=20.0,
+        )
+        if result.get("error"):
+            log.warning("horizon: summarizer err=%s", result["error"])
+            return ""
+        return (result.get("text") or "").strip()
     except Exception:
         log.exception("horizon: summarization call failed")
         return ""

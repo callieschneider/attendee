@@ -54,25 +54,28 @@ def is_addressed(
         return False
 
     try:
-        import google.generativeai as genai
+        from agent.llm_client import chat_completion
 
-        api_key = getattr(settings, "GOOGLE_API_KEY", "")
-        if not api_key:
-            return _heuristic_fallback(utterance_text, agent_name)
-
-        genai.configure(api_key=api_key)
         model_name = getattr(
-            settings, "AGENT_CLASSIFIER_MODEL", "gemini-2.5-flash-lite"
+            settings, "AGENT_CLASSIFIER_MODEL", "google/gemini-2.5-flash-lite"
         )
-        model = genai.GenerativeModel(
-            model_name,
-            system_instruction=_PROMPT_TEMPLATE.format(agent_name=agent_name),
+        result = chat_completion(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": _PROMPT_TEMPLATE.format(agent_name=agent_name),
+                },
+                {"role": "user", "content": f"Utterance: {utterance_text!r}"},
+            ],
+            temperature=0.0,
+            max_tokens=3,
+            timeout=10.0,
         )
-        resp = model.generate_content(
-            f"Utterance: {utterance_text!r}",
-            generation_config={"max_output_tokens": 3, "temperature": 0.0},
-        )
-        text = (getattr(resp, "text", "") or "").strip().upper()
+        if result.get("error"):
+            log.warning("is_addressed: classifier err=%s; using heuristic", result["error"])
+            return _heuristic_fallback(utterance_text, agent_name)
+        text = (result.get("text") or "").strip().upper()
         return text.startswith("Y")
     except Exception:
         log.exception("is_addressed: classifier call failed; falling back to heuristic")

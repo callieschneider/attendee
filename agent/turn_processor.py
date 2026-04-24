@@ -31,10 +31,7 @@ log = logging.getLogger("agent.turn_processor")
 # Cap how many events we feed into a single turn (protects against burst storms)
 MAX_CHUNK_SIZE = 80
 
-# Rough per-call cost estimate for Gemini 2.5 Flash (input + output).
-# Used only for the per-meeting budget cap; refine once we have real data.
-FLASH_COST_PER_1K_INPUT = Decimal("0.00015")
-FLASH_COST_PER_1K_OUTPUT = Decimal("0.0006")
+# Cost estimation lives in agent/llm_client.py now (OpenRouter-based).
 
 
 # ── Public Celery entrypoint ──────────────────────────────────────────────────
@@ -331,7 +328,7 @@ def _push_voice_briefing_safely(bot_id: str, turn_id: uuid.UUID) -> None:
         log.exception("_push_voice_briefing_safely: failed bot=%s", bot_id)
 
 
-# ── Gemini Flash with tools ───────────────────────────────────────────────────
+# ── Gemini Flash with tools (via OpenRouter) ──────────────────────────────────
 
 
 def _call_gemini_with_tools(
@@ -343,87 +340,30 @@ def _call_gemini_with_tools(
     priority: str,
 ) -> dict:
     """
-    Call Gemini 2.5 Flash with the full tool registry and let it decide actions.
-
-    Returns:
-        {
-            "tool_calls": [{"name": str, "args": dict}],
-            "text": str,
-            "cost_usd": Decimal,
-            "error": str | None,
-        }
+    Call the configured turn model with the full tool registry via OpenRouter.
+    Returns the normalized dict shape produced by `agent.llm_client.chat_completion`.
     """
-    try:
-        import google.generativeai as genai
-    except Exception:
-        return {"error": "google-generativeai not installed"}
-
-    api_key = getattr(settings, "GOOGLE_API_KEY", "")
-    if not api_key:
-        return {"error": "GOOGLE_API_KEY not configured"}
-
+    from agent.llm_client import chat_completion
     from agent.tools import TOOL_REGISTRY
-    from agent.tools.adapters import to_gemini_declaration
+    from agent.tools.adapters import to_openai_function
 
-    genai.configure(api_key=api_key)
+    tool_schemas = [to_openai_function(t) for t in TOOL_REGISTRY.values()]
 
-    # Build tool declarations (all tools — writes are gated by _is_tool_allowed)
-    tool_declarations = [to_gemini_declaration(t) for t in TOOL_REGISTRY.values()]
-    tools_cfg = [{"function_declarations": tool_declarations}] if tool_declarations else None
-
-    model_name = getattr(settings, "AGENT_TURN_MODEL", "gemini-2.5-flash")
-    model = genai.GenerativeModel(
-        model_name,
-        system_instruction=system_prompt,
-        tools=tools_cfg,
-    )
-
+    model_name = getattr(settings, "AGENT_TURN_MODEL", "google/gemini-2.5-flash")
     user_text = _render_user_prompt(chunk_events, priority)
-    try:
-        response = model.generate_content(
-            user_text,
-            generation_config={"temperature": 0.3, "max_output_tokens": 1024},
-        )
-    except Exception as exc:
-        return {"error": f"gemini call failed: {exc}"}
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
 
-    tool_calls: list[dict] = []
-    text_out = ""
-    try:
-        for candidate in getattr(response, "candidates", None) or []:
-            content = getattr(candidate, "content", None)
-            if not content:
-                continue
-            for part in getattr(content, "parts", None) or []:
-                fc = getattr(part, "function_call", None)
-                if fc and getattr(fc, "name", ""):
-                    tool_calls.append({
-                        "name": fc.name,
-                        "args": dict(getattr(fc, "args", {}) or {}),
-                    })
-                    continue
-                txt = getattr(part, "text", "")
-                if txt:
-                    text_out += txt
-    except Exception:
-        log.exception("_call_gemini_with_tools: response parse failed")
-
-    # Best-effort cost estimate from usage metadata
-    cost = Decimal("0")
-    usage = getattr(response, "usage_metadata", None)
-    if usage:
-        in_toks = Decimal(getattr(usage, "prompt_token_count", 0) or 0)
-        out_toks = Decimal(getattr(usage, "candidates_token_count", 0) or 0)
-        cost = (in_toks / Decimal("1000")) * FLASH_COST_PER_1K_INPUT + (
-            out_toks / Decimal("1000")
-        ) * FLASH_COST_PER_1K_OUTPUT
-
-    return {
-        "tool_calls": tool_calls,
-        "text": text_out,
-        "cost_usd": cost,
-        "error": None,
-    }
+    return chat_completion(
+        model=model_name,
+        messages=messages,
+        tools=tool_schemas,
+        tool_choice="auto",
+        temperature=0.3,
+        max_tokens=1024,
+    )
 
 
 def _render_user_prompt(chunk_events: list[dict], priority: str) -> str:

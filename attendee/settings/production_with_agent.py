@@ -14,18 +14,23 @@ INSTALLED_APPS = list(INSTALLED_APPS) + [
 ]
 
 # ---- Agent LLM settings ----
+# GOOGLE_API_KEY: only used for Gemini Live WebSocket (voice path).
+# OPENROUTER_API_KEY: used for ALL other LLM calls (turn processor,
+# classifier, summarizer, horizon compression).
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 AGENT_EMBEDDING_MODEL = "text-embedding-3-small"
 AGENT_EMBEDDING_DIMS = 1536
-AGENT_SUMMARIZER_MODEL = os.getenv("AGENT_SUMMARIZER_MODEL", "gemini-2.5-flash")
+AGENT_SUMMARIZER_MODEL = os.getenv("AGENT_SUMMARIZER_MODEL", "google/gemini-2.5-flash")
 AGENT_LIVE_MODEL = os.getenv("AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 AGENT_DEFAULT_VOICE = os.getenv("AGENT_DEFAULT_VOICE", "Zephyr")
 
 # ---- Phase 5 agent core rewrite ----
+# Model IDs use OpenRouter's `<provider>/<model>` format.
 AGENT_NAME = os.getenv("AGENT_NAME", "Clever Star")
-AGENT_TURN_MODEL = os.getenv("AGENT_TURN_MODEL", "gemini-2.5-flash")
-AGENT_CLASSIFIER_MODEL = os.getenv("AGENT_CLASSIFIER_MODEL", "gemini-2.5-flash-lite")
+AGENT_TURN_MODEL = os.getenv("AGENT_TURN_MODEL", "google/gemini-2.5-flash")
+AGENT_CLASSIFIER_MODEL = os.getenv("AGENT_CLASSIFIER_MODEL", "google/gemini-2.5-flash-lite")
 AGENT_TURN_WINDOW_SECONDS = float(os.getenv("AGENT_TURN_WINDOW_SECONDS", "8"))
 AGENT_PAUSE_THRESHOLD_SECONDS = float(os.getenv("AGENT_PAUSE_THRESHOLD_SECONDS", "2.0"))
 AGENT_PAUSE_MIN_CONTENT_SECONDS = float(os.getenv("AGENT_PAUSE_MIN_CONTENT_SECONDS", "6.0"))
