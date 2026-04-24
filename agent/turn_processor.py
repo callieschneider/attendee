@@ -60,6 +60,16 @@ def process_meeting_turn(
     except Exception as exc:
         log.exception("process_meeting_turn: unexpected failure bot=%s", bot_id)
         return {"error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        # Always release the scheduler's single-flight lock so the next
+        # turn can enqueue as soon as we're done. Safe to call even if we
+        # never acquired the lock (e.g. task retry paths).
+        try:
+            from agent.scheduler import release_inflight
+
+            release_inflight(bot_id)
+        except Exception:
+            log.exception("process_meeting_turn: release_inflight failed bot=%s", bot_id)
 
 
 def _process_turn(
@@ -143,6 +153,11 @@ def _process_turn(
     results = []
     from agent.tools import execute_tool
 
+    # Derive the dominant trigger kind for this chunk.
+    # If the chunk was triggered by a chat message, responses to the user
+    # MUST go via send_chat_message (not voice), and vice versa.
+    trigger_kind = _dominant_trigger_kind(chunk, priority)
+
     for call in tool_calls:
         tool_name = call.get("name", "")
         tool_input = call.get("args", {}) or {}
@@ -151,6 +166,21 @@ def _process_turn(
         if not _is_tool_allowed(tool_name, ctx_result.get("series")):
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
             continue
+        # Hard routing: chat trigger → chat reply; voice trigger → voice reply.
+        if trigger_kind == "chat" and tool_name == "speak_via_voice":
+            log.info(
+                "turn: rewriting speak_via_voice → send_chat_message (chat trigger) bot=%s",
+                bot_id,
+            )
+            tool_name = "send_chat_message"
+            tool_input = {"text": tool_input.get("text", ""), "to": "everyone"}
+        elif trigger_kind == "voice" and tool_name == "send_chat_message":
+            log.info(
+                "turn: rewriting send_chat_message → speak_via_voice (voice trigger) bot=%s",
+                bot_id,
+            )
+            tool_name = "speak_via_voice"
+            tool_input = {"text": tool_input.get("text", "")}
 
         entry = ActionLogEntry.objects.create(
             bot_id=bot_id,
@@ -211,6 +241,29 @@ def _event_to_dict(event) -> dict:
         "speaker": event.speaker,
         "text": event.text,
     }
+
+
+def _dominant_trigger_kind(chunk: list, priority: str) -> str:
+    """
+    Decide whether THIS turn was fired by a chat message or a speech
+    utterance, so the Turn Processor can route responses accordingly.
+
+    Rule: if priority=="chat" OR the most recent event in the chunk is a
+    chat message authored by someone other than the agent, the trigger is
+    chat. Otherwise voice.
+    """
+    if priority == "chat":
+        return "chat"
+    agent_name = (getattr(settings, "AGENT_NAME", "") or "").lower()
+    # Walk latest → oldest; first non-agent event determines the kind.
+    for event in reversed(chunk):
+        speaker_lower = (getattr(event, "speaker", "") or "").lower()
+        if agent_name and speaker_lower == agent_name:
+            continue
+        if getattr(event, "kind", "") == "chat":
+            return "chat"
+        return "voice"
+    return "voice"
 
 
 def _safe_jsonable(obj) -> dict:
@@ -375,13 +428,33 @@ def _render_user_prompt(chunk_events: list[dict], priority: str) -> str:
         prefix = f"[{kind}]" if kind != "speech" else ""
         lines.append(f"- {ts} {prefix} {ev.get('speaker', '?')}: {ev.get('text', '')}")
     lines.append("")
-    lines.append(
-        "Decide whether to take any action — create tasks/artifacts, respond via chat, "
-        "speak via voice, or save a link. "
-        + (
-            "The user just @-mentioned you in chat; respond via send_chat_message."
-            if priority == "chat"
-            else "If nothing warrants action, answer with exactly 'noop' (no tools)."
+
+    # Channel-routing instructions — the single most important decision.
+    is_chat = priority == "chat" or any(
+        e.get("kind") == "chat" for e in chunk_events[-3:]
+    )
+    if is_chat:
+        lines.append(
+            "## Response channel: CHAT"
+            "\nThe user addressed you in chat. Reply using `send_chat_message` "
+            "only. Do NOT call `speak_via_voice` for a chat message — that would "
+            "be jarring. Keep the reply to 1–2 short sentences."
         )
+    else:
+        lines.append(
+            "## Response channel: VOICE"
+            "\nIf you need to respond, use `speak_via_voice` only. Do NOT call "
+            "`send_chat_message` for a voice interaction — keep channels aligned. "
+            "Spoken replies should be short (under ~25 words) and conversational."
+        )
+
+    lines.append("")
+    lines.append(
+        "## When to act"
+        "\n- If the most recent utterance is directly addressed to you, respond in the channel above."
+        "\n- If a clear action item was stated, call `create_task` or `promote_meeting_task`."
+        "\n- If a URL worth saving was shared, call `save_artifact_from_url`."
+        "\n- Otherwise, **make no tool calls and return a single-word reply: 'noop'**. "
+        "Do NOT call `speak_via_voice` just to acknowledge something. Prefer silence."
     )
     return "\n".join(lines)

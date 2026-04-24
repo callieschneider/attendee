@@ -8,12 +8,17 @@ indexed queries on MeetingCursor + TranscriptEvent, then enqueues the
 Gate conditions (any triggers a turn):
   - `priority="chat"` (always run) — chat mentions and wake phrases are immediate
   - Unprocessed gap since last cursor ≥ AGENT_TURN_WINDOW_SECONDS
-  - Time since latest event ≥ AGENT_PAUSE_THRESHOLD_SECONDS AND any new content
+  - Time since latest event ≥ AGENT_PAUSE_THRESHOLD_SECONDS AND enough content
   - Direct trigger: latest event contains agent name or @agent chat mention
+
+Inflight protection: a Redis SETNX lock keyed on `agent:turn:inflight:<bot_id>`
+prevents parallel turns for the same bot when webhooks arrive in rapid bursts
+before `MeetingCursor.last_turn_at` has been updated.
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from django.conf import settings
@@ -21,10 +26,61 @@ from django.utils import timezone
 
 log = logging.getLogger("agent.scheduler")
 
-# Minimum seconds between turn invocations for the same bot (debounce).
-# Raised to 15s in response to Gemini 2.5 Flash free-tier rate limit (20 req/min)
-# being hit during early smoke tests. A chat priority signal always bypasses.
-TURN_DEBOUNCE_SECONDS = 15.0
+# Minimum seconds between turn invocations for the same bot.
+TURN_DEBOUNCE_SECONDS = 6.0
+
+# Redis-backed single-flight TTL (secs). Slightly longer than the Turn Processor's
+# soft_time_limit (40s) so the lock clears naturally if the task crashes.
+INFLIGHT_LOCK_TTL = 45
+
+
+_REDIS = None
+
+
+def _get_redis():
+    global _REDIS
+    if _REDIS is not None:
+        return _REDIS
+    try:
+        import redis
+
+        url = (
+            os.getenv("REDIS_URL")
+            or os.getenv("CELERY_BROKER_URL")
+            or "redis://localhost:6379/0"
+        )
+        _REDIS = redis.from_url(url, decode_responses=True)
+        return _REDIS
+    except Exception:
+        log.exception("scheduler: redis unavailable")
+        return None
+
+
+def _inflight_key(bot_id: str) -> str:
+    return f"agent:turn:inflight:{bot_id}"
+
+
+def _try_acquire_inflight(bot_id: str) -> bool:
+    """SETNX-style lock. Returns True iff we acquired it."""
+    r = _get_redis()
+    if r is None:
+        return True  # fail-open: scheduler isn't the last line of defense
+    try:
+        return bool(r.set(_inflight_key(bot_id), "1", ex=INFLIGHT_LOCK_TTL, nx=True))
+    except Exception:
+        log.exception("scheduler: inflight SETNX failed bot=%s", bot_id)
+        return True
+
+
+def release_inflight(bot_id: str) -> None:
+    """Called by the Turn Processor after it finishes to free the lock early."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.delete(_inflight_key(bot_id))
+    except Exception:
+        log.exception("scheduler: inflight DEL failed bot=%s", bot_id)
 
 
 def maybe_schedule_turn(bot_id: str, priority: str = "normal") -> str:
@@ -94,6 +150,11 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
     if not should_run:
         return "waiting"
 
+    # Single-flight lock — prevents N webhooks-in-a-burst from enqueuing N turns
+    # before any of them has a chance to update cursor.last_turn_at.
+    if not _try_acquire_inflight(bot_id):
+        return "deferred_inflight"
+
     # Enqueue the task (soft_time_limit in the task itself)
     try:
         from agent.turn_processor import process_meeting_turn
@@ -106,6 +167,8 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
         )
         return "scheduled"
     except Exception:
+        # If enqueue failed, release the lock so we don't block future turns
+        release_inflight(bot_id)
         log.exception("_maybe_schedule: enqueue failed bot=%s", bot_id)
         return "enqueue_failed"
 

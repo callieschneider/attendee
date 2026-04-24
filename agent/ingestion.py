@@ -250,10 +250,7 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
         log.exception("ingest_chat_message: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
-    # @agent chat mentions open the audio gate (so the bot can respond in-meeting)
-    if "@agent" in text.lower():
-        _open_gate_safely(bot_id, reason="chat_mention", ttl_seconds=15)
-
+    # Chat mentions never open the audio gate — chat replies go back through chat.
     _schedule_turn_safely(bot_id, priority="chat")
     return {
         "kind": "chat",
