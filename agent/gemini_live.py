@@ -35,13 +35,8 @@ def build_live_setup(system_prompt: str, voice: str = "Zephyr") -> dict:
                     }
                 },
             },
-            # VAD + interrupt: Gemini stops speaking when it detects user speech
-            "realtimeInputConfig": {
-                "activityHandling": "INTERRUPT_AND_RESPOND",
-                "voiceActivityDetection": {
-                    "disabled": False,
-                },
-            },
+            # Gemini Live handles VAD and interrupts natively when audio is streamed
+            # continuously — no explicit config needed for v1alpha.
             "systemInstruction": {
                 "parts": [{"text": system_prompt}]
             },
