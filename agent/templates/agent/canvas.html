@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Clever Star — {{ bot_id }}</title>
+<style>
+ * { box-sizing: border-box; margin: 0; padding: 0; }
+ html, body { height: 100%; background: #0a0b0f; color: #e5e7eb;
+              font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+              overflow: hidden; }
+ .frame { display: grid; grid-template-columns: 1fr 1fr; height: 100vh; gap: 0; }
+ .pane { border-right: 1px solid #1f2937; padding: 12px 14px; overflow: hidden; position: relative;
+         display: flex; flex-direction: column; }
+ .pane:last-child { border-right: none; }
+ h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+      color: #9ca3af; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+ h2 .tag { font-size: 10px; padding: 2px 7px; border-radius: 999px; background: #1f2937; color: #9ca3af;
+           text-transform: none; letter-spacing: 0; font-weight: normal; }
+ h2 .tag.open { background: #064e3b; color: #6ee7b7; }
+ h2 .tag.warn { background: #7c2d12; color: #fdba74; }
+ h2 .tag.err { background: #7f1d1d; color: #fca5a5; }
+
+ .card { background: #111318; border: 1px solid #1f2937; border-radius: 6px; padding: 10px 12px;
+         margin-bottom: 8px; }
+ .statline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; font-size: 11px; }
+ .statline .stat { background: #0f1117; border: 1px solid #1f2937; border-radius: 4px; padding: 6px 8px; }
+ .statline .stat .k { color: #6b7280; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+ .statline .stat .v { color: #e5e7eb; font-weight: 500; margin-top: 2px; }
+ .statline .stat.live { border-color: #047857; }
+
+ .feed { flex: 1; overflow-y: auto; padding: 2px 0; }
+ .feed::-webkit-scrollbar { width: 6px; }
+ .feed::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 4px; }
+ .ev { display: grid; grid-template-columns: 54px 1fr; gap: 8px; padding: 4px 0;
+       border-bottom: 1px solid #13151b; font-size: 12px; }
+ .ev .t { color: #6b7280; font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; }
+ .ev .sp { color: #93c5fd; font-weight: 500; }
+ .ev.chat .sp { color: #f9a8d4; }
+ .ev.action .sp { color: #fcd34d; }
+ .ev.action.ok .sp { color: #6ee7b7; }
+ .ev.action.err .sp { color: #fca5a5; }
+ .ev .txt { color: #e5e7eb; word-wrap: break-word; word-break: break-word; }
+
+ .thinking {
+   display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+   background: #fbbf24; margin-right: 6px; vertical-align: middle;
+   animation: pulse 1s ease-in-out infinite alternate;
+ }
+ @keyframes pulse { from { opacity: 0.3; transform: scale(0.85);} to { opacity: 1; transform: scale(1.1); } }
+
+ /* Visualization pane */
+ .viz { flex: 1; display: flex; align-items: center; justify-content: center;
+        background: radial-gradient(ellipse at center, #1e1b4b 0%, #0a0b0f 70%);
+        border-radius: 8px; position: relative; overflow: hidden; }
+ .viz .empty-title { font-size: 72px; font-weight: 200; letter-spacing: -0.03em;
+                     background: linear-gradient(135deg, #c7d2fe 0%, #a5b4fc 50%, #818cf8 100%);
+                     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                     background-clip: text; }
+ .viz .empty-sub { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%);
+                   color: #6b7280; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; }
+ .viz pre.spec { width: 92%; height: 92%; overflow: auto; background: #0f1117;
+                 border: 1px solid #1f2937; border-radius: 6px; padding: 14px;
+                 color: #d1d5db; font-family: ui-monospace, monospace; font-size: 11px;
+                 white-space: pre-wrap; }
+
+ .gate-indicator { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                   margin-right: 6px; vertical-align: middle; }
+ .gate-indicator.open { background: #22c55e; box-shadow: 0 0 6px #22c55e80; }
+ .gate-indicator.closed { background: #4b5563; }
+
+ .err-overlay { background: #7f1d1d; color: #fecaca; padding: 8px 10px;
+                border-radius: 4px; margin-top: 8px; font-size: 11px;
+                word-wrap: break-word; }
+
+ .footer-meta { margin-top: auto; padding-top: 8px; border-top: 1px solid #1f2937;
+                color: #6b7280; font-size: 10px; font-family: ui-monospace, monospace;
+                display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+<div class="frame">
+
+  <!-- LEFT: DEBUG PANE -->
+  <section class="pane" id="debug-pane">
+    <h2>
+      <span id="thinking-slot"></span>Clever Star — Live Debug
+      <span id="gate-tag" class="tag">gate: —</span>
+    </h2>
+
+    <div class="statline">
+      <div class="stat" id="stat-cursor"><div class="k">Cursor</div><div class="v" id="cursor-v">—</div></div>
+      <div class="stat" id="stat-turn"><div class="k">Last turn</div><div class="v" id="turn-v">—</div></div>
+      <div class="stat" id="stat-cost"><div class="k">Cost</div><div class="v" id="cost-v">$0 / $0</div></div>
+      <div class="stat" id="stat-events"><div class="k">Events</div><div class="v" id="events-v">0</div></div>
+    </div>
+
+    <h2 style="margin-top:14px">Transcript + Actions</h2>
+    <div class="feed" id="feed"></div>
+
+    <div class="footer-meta">
+      <span id="bot-id">bot: {{ bot_id }}</span>
+      <span id="last-update">—</span>
+    </div>
+  </section>
+
+  <!-- RIGHT: VISUALIZATION PANE -->
+  <section class="pane">
+    <h2>
+      Canvas
+      <span id="viz-tag" class="tag">idle</span>
+    </h2>
+    <div class="viz" id="viz">
+      <div class="empty-title">Clever Star</div>
+      <div class="empty-sub">ready</div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+(function() {
+  const botId = "{{ bot_id|escapejs }}";
+  const streamUrl = "/agent/canvas/" + botId + "/stream";
+  const fallbackUrl = "/agent/canvas/" + botId + "/state.json";
+
+  const feedEl = document.getElementById('feed');
+  const thinkingSlotEl = document.getElementById('thinking-slot');
+  const gateTagEl = document.getElementById('gate-tag');
+  const cursorV = document.getElementById('cursor-v');
+  const turnV = document.getElementById('turn-v');
+  const costV = document.getElementById('cost-v');
+  const eventsV = document.getElementById('events-v');
+  const lastUpdateEl = document.getElementById('last-update');
+  const vizEl = document.getElementById('viz');
+  const vizTag = document.getElementById('viz-tag');
+
+  function applyState(s) {
+    lastUpdateEl.textContent = new Date().toLocaleTimeString();
+
+    // Cursor + budget
+    const c = s.cursor || {};
+    if (c.present) {
+      cursorV.textContent = shortTime(c.cursor_event_time) || '—';
+      turnV.textContent = shortTime(c.last_turn_at) || '—';
+      costV.textContent = '$' + Number(c.total_cost_usd || 0).toFixed(4)
+                          + ' / $' + Number(c.budget_cap_usd || 0).toFixed(2);
+      const open = !!c.audio_gate_open;
+      gateTagEl.textContent = 'gate: ' + (open ? 'OPEN (' + (c.audio_gate_reason || '') + ')' : 'closed');
+      gateTagEl.className = 'tag ' + (open ? 'open' : '');
+    } else {
+      cursorV.textContent = '—';
+      turnV.textContent = '—';
+      gateTagEl.textContent = 'gate: waiting';
+    }
+
+    // Thinking indicator
+    thinkingSlotEl.innerHTML = s.thinking ? '<span class="thinking" title="processing"></span>' : '';
+
+    // Merge events + actions, sort by time
+    const combined = [];
+    (s.events || []).forEach(e => combined.push({
+      ts: e.t, kind: e.kind, speaker: e.speaker || '?', text: e.text || '', klass: e.kind
+    }));
+    (s.actions || []).forEach(a => combined.push({
+      ts: a.t, kind: 'action', speaker: a.tool, text: (a.error ? 'ERR: ' + a.error :
+                                                       (a.latency_ms ? a.latency_ms + 'ms' : '')),
+      klass: 'action ' + (a.status === 'error' ? 'err' : a.status === 'ok' ? 'ok' : '')
+    }));
+    combined.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+    eventsV.textContent = combined.length;
+
+    // Render feed
+    feedEl.innerHTML = combined.map(row => {
+      const t = shortTime(row.ts) || '--:--';
+      return `<div class="ev ${esc(row.klass)}">
+        <span class="t">${t}</span>
+        <div><span class="sp">${esc(row.speaker)}</span> ${esc(row.text)}</div>
+      </div>`;
+    }).join('');
+    feedEl.scrollTop = feedEl.scrollHeight;
+
+    // Visualization panel
+    applyVisual(s.visual);
+  }
+
+  function applyVisual(v) {
+    if (!v || !v.spec) {
+      vizTag.textContent = 'idle';
+      vizTag.className = 'tag';
+      vizEl.innerHTML = `
+        <div class="empty-title">Clever Star</div>
+        <div class="empty-sub">ready</div>`;
+      return;
+    }
+    vizTag.textContent = 'showing: ' + (v.title || 'visual');
+    vizTag.className = 'tag open';
+    // Phase 5: render the spec as pretty JSON. Phase 6 will swap in Vega-Lite or similar.
+    vizEl.innerHTML = `<pre class="spec">${esc(JSON.stringify(v.spec, null, 2))}</pre>`;
+  }
+
+  function shortTime(iso) {
+    if (!iso) return '';
+    try { return new Date(iso).toLocaleTimeString('en-US', { hour12: false }).slice(0, 8); }
+    catch (e) { return iso.slice(11, 19); }
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+
+  // Start SSE, fall back to polling
+  let src;
+  try { src = new EventSource(streamUrl); } catch (e) { startPolling(); return; }
+  src.addEventListener('state', e => {
+    try { applyState(JSON.parse(e.data)); } catch (err) { console.error(err); }
+  });
+  src.addEventListener('heartbeat', () => {});
+  src.onerror = () => { console.warn('SSE error; falling back to polling'); src.close(); startPolling(); };
+
+  async function startPolling() {
+    while (true) {
+      try {
+        const r = await fetch(fallbackUrl);
+        const j = await r.json();
+        applyState(j);
+      } catch (e) { console.warn(e); }
+      await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+})();
+</script>
+</body>
+</html>

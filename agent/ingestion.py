@@ -179,10 +179,20 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
         log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
+    # Any speech event extends the audio gate if it's already open —
+    # this is how conversations feel natural (user doesn't have to re-trigger
+    # the agent's name on every turn). Direct-address detection below can
+    # still OPEN a closed gate.
+    _extend_gate_safely(bot_id, ttl_seconds=30)
+
     # Direct-address detection → open the audio gate (best-effort)
     _maybe_open_gate_on_address(bot_id, text)
 
-    # Fire-and-forget schedule — never blocks the webhook
+    # Fire-and-forget schedule. Gemini Live handles live conversation
+    # natively when the gate is open (low latency, no round-trip through
+    # the Turn Processor). The Turn Processor still runs for actions
+    # (tasks, artifacts, URLs) — but not just to produce a spoken reply
+    # during an active conversation.
     _schedule_turn_safely(bot_id)
 
     return {
@@ -277,7 +287,7 @@ def _maybe_open_gate_on_address(bot_id: str, text: str) -> None:
         log.exception("_maybe_open_gate_on_address: classifier failed bot=%s", bot_id)
 
 
-def _open_gate_safely(bot_id: str, reason: str, ttl_seconds: int = 15) -> None:
+def _open_gate_safely(bot_id: str, reason: str, ttl_seconds: int = 30) -> None:
     try:
         from agent.live_session.signals import publish_gate_open
 
@@ -286,6 +296,21 @@ def _open_gate_safely(bot_id: str, reason: str, ttl_seconds: int = 15) -> None:
         pass
     except Exception:
         log.exception("_open_gate_safely: publish failed bot=%s", bot_id)
+
+
+def _extend_gate_safely(bot_id: str, ttl_seconds: int = 30) -> None:
+    """
+    Publish a gate-extend signal. The bridge will only act if the gate is
+    already open. Used on every speech event to keep conversations alive.
+    """
+    try:
+        from agent.live_session.signals import publish_gate_extend
+
+        publish_gate_extend(bot_id, ttl_seconds=ttl_seconds)
+    except ImportError:
+        pass
+    except Exception:
+        log.exception("_extend_gate_safely: publish failed bot=%s", bot_id)
 
 
 def _schedule_turn_safely(bot_id: str, priority: str = "normal") -> None:

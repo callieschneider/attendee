@@ -21,6 +21,7 @@ from typing import Optional
 log = logging.getLogger("agent.live_session.signals")
 
 GATE_CHANNEL = "agent:live:gate"
+GATE_EXTEND_CHANNEL = "agent:live:gate_extend"
 SPEAK_CHANNEL = "agent:live:speak"
 VOICE_CONTEXT_CHANNEL = "agent:live:voice_ctx"
 
@@ -64,8 +65,13 @@ def _publish(channel: str, payload: dict) -> bool:
         return False
 
 
-def publish_gate_open(bot_id: str, reason: str, ttl_seconds: int = 15) -> bool:
+def publish_gate_open(bot_id: str, reason: str, ttl_seconds: int = 30) -> bool:
     return _publish(GATE_CHANNEL, {"bot_id": bot_id, "reason": reason, "ttl_seconds": ttl_seconds})
+
+
+def publish_gate_extend(bot_id: str, ttl_seconds: int = 30) -> bool:
+    """Extend the gate TTL iff already open. No-op if gate is closed."""
+    return _publish(GATE_EXTEND_CHANNEL, {"bot_id": bot_id, "ttl_seconds": ttl_seconds})
 
 
 def publish_speak(bot_id: str, text: str) -> bool:

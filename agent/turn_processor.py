@@ -115,6 +115,11 @@ def _process_turn(
         budget_cap = cursor.budget_cap_usd
         current_cost = cursor.total_cost_usd
 
+    # Snapshot audio gate state — if open, Gemini Live is already conversing
+    # with the user in real time. The Turn Processor should focus on silent
+    # actions (tasks, artifacts, URLs) and NOT duplicate voice replies.
+    voice_conversation_active = bool(cursor.audio_gate_open)
+
     # ── Build context + call Flash ────────────────────────────────────────────
     ctx_result = build_context(bot_id=bot_id, task="live_turn")
 
@@ -126,6 +131,7 @@ def _process_turn(
         agent_name=ctx_result.get("agent_name", "Clever Star"),
         series=ctx_result.get("series"),
         priority=priority,
+        voice_conversation_active=voice_conversation_active,
     )
 
     if gemini_response.get("error"):
@@ -165,6 +171,14 @@ def _process_turn(
             continue
         if not _is_tool_allowed(tool_name, ctx_result.get("series")):
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
+            continue
+        # If a voice conversation is already in progress, Gemini Live is
+        # handling spoken replies — the Turn Processor must NOT also speak.
+        if voice_conversation_active and tool_name == "speak_via_voice":
+            log.info(
+                "turn: SUPPRESS speak_via_voice — voice conversation active bot=%s",
+                bot_id,
+            )
             continue
         # Hard routing: chat trigger → chat reply; voice trigger → voice reply.
         if trigger_kind == "chat" and tool_name == "speak_via_voice":
@@ -391,6 +405,7 @@ def _call_gemini_with_tools(
     agent_name: str,
     series: Optional[dict],
     priority: str,
+    voice_conversation_active: bool = False,
 ) -> dict:
     """
     Call the configured turn model with the full tool registry via OpenRouter.
@@ -403,7 +418,9 @@ def _call_gemini_with_tools(
     tool_schemas = [to_openai_function(t) for t in TOOL_REGISTRY.values()]
 
     model_name = getattr(settings, "AGENT_TURN_MODEL", "google/gemini-2.5-flash")
-    user_text = _render_user_prompt(chunk_events, priority)
+    user_text = _render_user_prompt(
+        chunk_events, priority, voice_conversation_active=voice_conversation_active
+    )
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_text},
@@ -419,7 +436,11 @@ def _call_gemini_with_tools(
     )
 
 
-def _render_user_prompt(chunk_events: list[dict], priority: str) -> str:
+def _render_user_prompt(
+    chunk_events: list[dict],
+    priority: str,
+    voice_conversation_active: bool = False,
+) -> str:
     """Render the user-role message passed alongside the systemInstruction."""
     lines = ["## New transcript events since last turn", ""]
     for ev in chunk_events:
@@ -439,6 +460,16 @@ def _render_user_prompt(chunk_events: list[dict], priority: str) -> str:
             "\nThe user addressed you in chat. Reply using `send_chat_message` "
             "only. Do NOT call `speak_via_voice` for a chat message — that would "
             "be jarring. Keep the reply to 1–2 short sentences."
+        )
+    elif voice_conversation_active:
+        lines.append(
+            "## Voice conversation in progress — DO NOT duplicate speech"
+            "\nThe audio gate is open and Gemini Live is already conversing with "
+            "the user in real time. You should NOT call `speak_via_voice`. "
+            "Focus only on SILENT actions that Gemini Live can't do itself: "
+            "`create_task`, `promote_meeting_task`, `save_artifact_from_url`, "
+            "`create_artifact`, `send_email_summary`. If nothing warrants a "
+            "silent action, reply with exactly 'noop'."
         )
     else:
         lines.append(

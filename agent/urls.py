@@ -21,4 +21,6 @@ urlpatterns = [
 
     # Phase 5 live-meeting dashboard
     path("dashboard/", include("agent.dashboard.urls")),
+    # Phase 5 bot canvas — the page Attendee renders as the bot's video feed
+    path("canvas/", include("agent.canvas.urls")),
 ]

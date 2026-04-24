@@ -8,8 +8,10 @@ Live voice session package.
 """
 from .signals import (
     GATE_CHANNEL,
+    GATE_EXTEND_CHANNEL,
     SPEAK_CHANNEL,
     VOICE_CONTEXT_CHANNEL,
+    publish_gate_extend,
     publish_gate_open,
     publish_speak,
     publish_voice_context,
@@ -19,8 +21,10 @@ from .voice_pump import enqueue_voice_briefing
 
 __all__ = [
     "GATE_CHANNEL",
+    "GATE_EXTEND_CHANNEL",
     "SPEAK_CHANNEL",
     "VOICE_CONTEXT_CHANNEL",
+    "publish_gate_extend",
     "publish_gate_open",
     "publish_speak",
     "publish_voice_context",

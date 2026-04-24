@@ -233,8 +233,13 @@ class LiveSessionManager:
                     return
 
         if server_content.get("turnComplete"):
-            log.info("live_session: turnComplete bot=%s — closing gate", self.bot_id)
-            await self.gate.close("turn_complete")
+            # Don't slam the gate shut on turnComplete — the user may be
+            # mid-conversation. Let the AudioGate's TTL auto-close handle
+            # the "no activity for N seconds" case instead.
+            log.debug(
+                "live_session: turnComplete bot=%s — leaving gate open for reply",
+                self.bot_id,
+            )
 
         # Tool calls — only read-only fast-path; writes go through Turn Processor
         tc = msg.get("toolCall")
@@ -334,6 +339,7 @@ class LiveSessionManager:
         """Subscribe to Redis signals and dispatch into the live session."""
         channels = [
             signals.GATE_CHANNEL,
+            signals.GATE_EXTEND_CHANNEL,
             signals.SPEAK_CHANNEL,
             signals.VOICE_CONTEXT_CHANNEL,
         ]
@@ -346,7 +352,11 @@ class LiveSessionManager:
                 if channel == signals.GATE_CHANNEL:
                     await self.gate.open(
                         reason=payload.get("reason", "signal"),
-                        ttl_seconds=int(payload.get("ttl_seconds", 15)),
+                        ttl_seconds=int(payload.get("ttl_seconds", 30)),
+                    )
+                elif channel == signals.GATE_EXTEND_CHANNEL:
+                    await self.gate.extend_if_open(
+                        ttl_seconds=int(payload.get("ttl_seconds", 30)),
                     )
                 elif channel == signals.SPEAK_CHANNEL:
                     text = payload.get("text", "")

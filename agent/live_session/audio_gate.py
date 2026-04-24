@@ -25,7 +25,7 @@ class AudioGate:
     def reason(self) -> str:
         return self._reason
 
-    async def open(self, reason: str, ttl_seconds: int = 15) -> None:
+    async def open(self, reason: str, ttl_seconds: int = 30) -> None:
         was_open = self.is_open
         self.is_open = True
         self._reason = reason
@@ -37,6 +37,17 @@ class AudioGate:
             log.info("audio_gate: OPEN bot=%s reason=%s ttl=%ds", self.bot_id, reason, ttl_seconds)
         else:
             log.info("audio_gate: EXTEND bot=%s reason=%s ttl=%ds", self.bot_id, reason, ttl_seconds)
+
+    async def extend_if_open(self, ttl_seconds: int = 30) -> bool:
+        """
+        Extend the gate TTL ONLY if already open. Returns True if extended.
+        Used for "conversational activity" signals that shouldn't themselves
+        open the gate (e.g. any speech while mid-conversation).
+        """
+        if not self.is_open:
+            return False
+        await self.open(reason=self._reason or "activity", ttl_seconds=ttl_seconds)
+        return True
 
     async def close(self, reason: str = "explicit") -> None:
         if self._auto_close_task and not self._auto_close_task.done():
