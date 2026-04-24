@@ -66,21 +66,27 @@ def _create_task(inp: dict, ctx: dict) -> dict:
 
 
 def _update_task_status(inp: dict, ctx: dict) -> dict:
+    import uuid as _uuid
     from agent.models import Task
 
     task_id = inp.get("task_id")
     new_status = inp.get("status")
     if not task_id or not new_status:
-        return {"error": "task_id and status required"}
+        return {"error": "task_id and status required. Call list_tasks first to get real task IDs."}
 
     valid_statuses = ["backlog", "todo", "in_progress", "in_review", "done", "cancelled"]
     if new_status not in valid_statuses:
         return {"error": f"status must be one of {valid_statuses}"}
 
     try:
+        _uuid.UUID(str(task_id))
+    except ValueError:
+        return {"error": f"'{task_id}' is not a valid UUID. Call list_tasks first to get real task IDs."}
+
+    try:
         task = Task.objects.get(id=task_id)
     except Task.DoesNotExist:
-        return {"error": f"task {task_id} not found"}
+        return {"error": f"task {task_id} not found. Call list_tasks to see available tasks."}
 
     task.status = new_status
     task.save(update_fields=["status", "updated_at"])
@@ -128,11 +134,11 @@ TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="update_task_status",
-        description="Update the status of a task.",
+        description="Update the status of a task. IMPORTANT: Always call list_tasks first to get real task UUIDs — never guess or make up a task_id.",
         input_schema=ToolSchema(
             type="object",
             properties={
-                "task_id": {"type": "string", "description": "UUID of the Task"},
+                "task_id": {"type": "string", "description": "UUID of the Task — must come from list_tasks, never invented"},
                 "status": {
                     "type": "string",
                     "description": "New status",

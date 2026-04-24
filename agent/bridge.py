@@ -181,7 +181,14 @@ async def forward_gemini_to_attendee(gemini_ws, attendee_ws, bot_id: str):
 
         # ── Audio output from Gemini ──────────────────────────────────────
         server_content = msg.get("serverContent", {})
+
+        # Handle interrupt: Gemini stopped itself because user spoke
+        if server_content.get("interrupted"):
+            log.info("bridge: Gemini interrupted (user spoke) for bot %s", bot_id)
+            continue
+
         model_turn = server_content.get("modelTurn", {})
+        audio_chunks_sent = 0
         for part in model_turn.get("parts", []):
             inline = part.get("inlineData", {})
             mime = inline.get("mimeType", "")
@@ -197,6 +204,13 @@ async def forward_gemini_to_attendee(gemini_ws, attendee_ws, bot_id: str):
                         "sample_rate": ATTENDEE_SAMPLE_RATE,
                     },
                 }))
+                audio_chunks_sent += 1
+
+        if audio_chunks_sent:
+            log.info("bridge: sent %d audio chunks to Attendee for bot %s", audio_chunks_sent, bot_id)
+
+        if server_content.get("turnComplete"):
+            log.info("bridge: Gemini turn complete for bot %s", bot_id)
 
         # ── Tool calls from Gemini ────────────────────────────────────────
         tool_call = msg.get("toolCall", {})
