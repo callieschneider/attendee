@@ -104,5 +104,5 @@ django-csp==4.0
 pyotp==2.9.0
 # Agent app dependencies
 pgvector==0.3.6
-openai==1.59.0
+openai==1.59.9
 google-generativeai==0.8.4
