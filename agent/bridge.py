@@ -34,11 +34,16 @@ log = logging.getLogger("agent.bridge")
 BRIDGE_PORT = int(os.getenv("PORT", os.getenv("BRIDGE_PORT", "8765")))
 
 
-async def _resolve_bot_id(session_id_or_bot_id: str) -> str:
+async def _resolve_bot_id(session_id_or_bot_id: str) -> str | None:
     """
-    The WS path carries either a `session_id` (legacy, from create_meeting_bot)
-    or a real `bot_id` (preferred). Try bot_id directly first; if that doesn't
-    match, fall through to session_id (letting the caller still have something).
+    The WS path carries a UUID `session_id` (set at bot creation in
+    `create_meeting_bot`). We locate the real `bot_id` via
+    `Bot.metadata.bridge_session_id`. Falls back to treating the segment
+    as a bot_id directly for legacy paths.
+
+    Returns None if we cannot resolve to a real bot — caller should close
+    the WS to avoid `DataError: value too long for type character varying(32)`
+    when the UUID spills into MeetingCursor.bot_id.
     """
 
     @sync_to_async
@@ -46,12 +51,20 @@ async def _resolve_bot_id(session_id_or_bot_id: str) -> str:
         try:
             from bots.models import Bot
 
-            bot = Bot.objects.filter(object_id=session_id_or_bot_id).first()
+            # Preferred: look up via metadata.bridge_session_id
+            bot = Bot.objects.filter(
+                metadata__bridge_session_id=session_id_or_bot_id
+            ).first()
             if bot:
                 return bot.object_id
+            # Legacy fallback: incoming path segment IS the bot_id
+            if len(session_id_or_bot_id) <= 32:
+                bot = Bot.objects.filter(object_id=session_id_or_bot_id).first()
+                if bot:
+                    return bot.object_id
         except Exception:
             log.exception("_resolve_bot_id: DB lookup failed")
-        return session_id_or_bot_id  # fallback
+        return None
 
     return await _lookup()
 
@@ -61,6 +74,12 @@ async def bridge_session(attendee_ws, session_id: str) -> None:
     from agent.live_session.manager import LiveSessionManager
 
     bot_id = await _resolve_bot_id(session_id)
+    if not bot_id:
+        log.warning(
+            "bridge: could not resolve session_id=%s to a bot; closing", session_id
+        )
+        await attendee_ws.close(1008, "Unknown session")
+        return
     log.info("bridge: session started session_id=%s bot_id=%s", session_id, bot_id)
 
     manager = LiveSessionManager(bot_id=bot_id)

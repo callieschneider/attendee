@@ -102,9 +102,12 @@ def create_meeting_bot(request):
                 "sample_rate": 16000,
             }
         },
+        # Always set bridge_session_id so the bridge can look up the bot by its
+        # session_id path segment. See agent/bridge.py::_resolve_bot_id.
+        "metadata": {"bridge_session_id": session_id},
     }
     if series_id:
-        bot_payload["metadata"] = {"series_id": series_id}
+        bot_payload["metadata"]["series_id"] = series_id
 
     try:
         resp = req.post(
