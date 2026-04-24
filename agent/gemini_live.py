@@ -12,13 +12,7 @@ from .tools.adapters import to_gemini_declaration
 
 log = logging.getLogger("agent.gemini_live")
 
-LIVE_AUTH_TOKEN_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/"
-    "{model}:generateContent"  # placeholder — auth_tokens below
-)
-
-# Auth tokens endpoint for ephemeral token minting
-AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1beta/auth_tokens"
+AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
 
 
 def build_live_setup(system_prompt: str, voice: str = "Zephyr") -> dict:
@@ -60,12 +54,17 @@ def mint_ephemeral_token(setup_msg: dict, ttl_seconds: int = 1800) -> dict:
     if not api_key:
         raise ValueError("GOOGLE_API_KEY not configured")
 
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    expire_time = (now + timedelta(seconds=ttl_seconds)).isoformat()
+    new_session_expire_time = (now + timedelta(minutes=5)).isoformat()
+
     url = f"{AUTH_TOKENS_URL}?key={api_key}"
     body = {
-        "config": {
-            "uses": 1,
-            "bidiGenerateContentSetup": setup_msg["setup"],
-        }
+        "uses": 1,
+        "expireTime": expire_time,
+        "newSessionExpireTime": new_session_expire_time,
+        "bidiGenerateContentSetup": setup_msg["setup"],
     }
 
     try:
