@@ -5,7 +5,7 @@ DJANGO_SETTINGS_MODULE=attendee.settings.production_with_agent
 import os
 
 from .production import *  # noqa: F401,F403
-from .production import INSTALLED_APPS, CELERY_TASK_ROUTES
+from .production import INSTALLED_APPS
 
 # ---- Agent app ----
 INSTALLED_APPS = list(INSTALLED_APPS) + [
@@ -22,11 +22,7 @@ AGENT_SUMMARIZER_MODEL = os.getenv("AGENT_SUMMARIZER_MODEL", "gemini-2.5-flash")
 AGENT_LIVE_MODEL = os.getenv("AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 AGENT_DEFAULT_VOICE = os.getenv("AGENT_DEFAULT_VOICE", "Zephyr")
 
-# ---- Agent Celery task routing (separate queue from bot tasks) ----
-CELERY_TASK_ROUTES = {
-    **CELERY_TASK_ROUTES,
-    "agent.tasks.*": {"queue": "agent"},
-}
+# Agent tasks run on the default 'celery' queue — same worker handles everything.
 
 # ---- Attendee webhook secret (for HMAC verification) ----
 ATTENDEE_WEBHOOK_SECRET = os.getenv("ATTENDEE_WEBHOOK_SECRET", "")
