@@ -21,8 +21,10 @@ from django.utils import timezone
 
 log = logging.getLogger("agent.scheduler")
 
-# Minimum seconds between turn invocations for the same bot (debounce)
-TURN_DEBOUNCE_SECONDS = 3.0
+# Minimum seconds between turn invocations for the same bot (debounce).
+# Raised to 15s in response to Gemini 2.5 Flash free-tier rate limit (20 req/min)
+# being hit during early smoke tests. A chat priority signal always bypasses.
+TURN_DEBOUNCE_SECONDS = 15.0
 
 
 def maybe_schedule_turn(bot_id: str, priority: str = "normal") -> str:
@@ -71,16 +73,22 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
     # Trigger decision
     window = float(getattr(settings, "AGENT_TURN_WINDOW_SECONDS", 8))
     pause = float(getattr(settings, "AGENT_PAUSE_THRESHOLD_SECONDS", 2.0))
+    # Minimum new content before pause-triggered turns fire. Prevents tiny
+    # utterances from firing a turn every time the speaker pauses.
+    min_content_for_pause = float(getattr(settings, "AGENT_PAUSE_MIN_CONTENT_SECONDS", 6.0))
 
     oldest = qs.order_by("event_time", "created_at").first() or latest
     gap = (latest.event_time - oldest.event_time).total_seconds()
     silence = (now - latest.event_time).total_seconds()
 
+    # Pause trigger only fires AFTER enough content has accumulated
+    pause_trigger = silence >= pause and gap >= min_content_for_pause
+
     should_run = (
         priority == "chat"
         or _is_wake_trigger(latest)
         or gap >= window
-        or silence >= pause
+        or pause_trigger
     )
 
     if not should_run:
