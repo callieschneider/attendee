@@ -41,9 +41,11 @@ log = logging.getLogger("agent.bridge")
 BRIDGE_PORT = int(os.getenv("PORT", os.getenv("BRIDGE_PORT", "8765")))
 
 # Gemini Live WebSocket URL
+# BidiGenerateContent (not Constrained) accepts API key directly.
+# BidiGenerateContentConstrained requires an ephemeral token — that's the browser-side path.
 GEMINI_WS_URL = (
     "wss://generativelanguage.googleapis.com"
-    "/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
+    "/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
 )
 
 ATTENDEE_SAMPLE_RATE = 16000   # Hz — Attendee sends and expects 16kHz
