@@ -73,6 +73,32 @@ def _list_series(inp: dict, ctx: dict) -> dict:
     }
 
 
+def _assign_meeting_to_series(inp: dict, ctx: dict) -> dict:
+    """Move a MeetingOccurrence to a different MeetingSeries."""
+    from agent.models import MeetingOccurrence, MeetingSeries
+
+    occurrence_id = inp.get("occurrence_id")
+    series_id = inp.get("series_id")
+    if not occurrence_id or not series_id:
+        return {"error": "occurrence_id and series_id required"}
+
+    try:
+        occ = MeetingOccurrence.objects.get(id=occurrence_id)
+    except MeetingOccurrence.DoesNotExist:
+        return {"error": f"occurrence {occurrence_id} not found"}
+
+    try:
+        series = MeetingSeries.objects.get(id=series_id)
+    except MeetingSeries.DoesNotExist:
+        return {"error": f"series {series_id} not found"}
+
+    old_series = occ.series.title
+    occ.series = series
+    occ.save(update_fields=["series"])
+
+    return {"updated": True, "occurrence_id": occurrence_id, "old_series": old_series, "new_series": series.title}
+
+
 TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="get_series_context_bundle",
@@ -94,5 +120,18 @@ TOOLS: list[ToolDefinition] = [
             properties={},
         ),
         handler=_list_series,
+    ),
+    ToolDefinition(
+        name="assign_meeting_to_series",
+        description="Move a MeetingOccurrence to a different MeetingSeries. Use this when a meeting was automatically assigned to the wrong series or to Inbox.",
+        input_schema=ToolSchema(
+            type="object",
+            properties={
+                "occurrence_id": {"type": "string", "description": "UUID of the MeetingOccurrence to move"},
+                "series_id": {"type": "string", "description": "UUID of the target MeetingSeries"},
+            },
+            required=["occurrence_id", "series_id"],
+        ),
+        handler=_assign_meeting_to_series,
     ),
 ]

@@ -1,4 +1,4 @@
-"""Meeting occurrence tools."""
+"""Meeting occurrence and calendar tools."""
 import logging
 
 from .types import ToolDefinition, ToolSchema
@@ -73,6 +73,51 @@ def _get_meeting_notes(inp: dict, ctx: dict) -> dict:
     }
 
 
+def _list_upcoming_meetings(inp: dict, ctx: dict) -> dict:
+    """List upcoming calendar events with Google Meet URLs."""
+    from bots.models import CalendarEvent
+    from agent.series_manager import assign_series
+    from django.utils import timezone
+    import datetime
+
+    days = min(int(inp.get("days", 7)), 30)
+    now = timezone.now()
+    until = now + datetime.timedelta(days=days)
+
+    events = (
+        CalendarEvent.objects.filter(
+            start_time__gte=now,
+            start_time__lte=until,
+            is_deleted=False,
+        )
+        .exclude(meeting_url__isnull=True)
+        .exclude(meeting_url="")
+        .order_by("start_time")[:20]
+    )
+
+    results = []
+    for evt in events:
+        try:
+            series = assign_series(evt)
+            series_name = series.title
+            series_id = str(series.id)
+        except Exception:
+            series_name = "Inbox"
+            series_id = ""
+        results.append({
+            "event_id": evt.object_id,
+            "title": evt.name or "Untitled",
+            "start_time": evt.start_time.isoformat(),
+            "end_time": evt.end_time.isoformat() if evt.end_time else None,
+            "meeting_url": evt.meeting_url,
+            "series": series_name,
+            "series_id": series_id,
+            "attendees": evt.attendees or [],
+        })
+
+    return {"upcoming_meetings": results, "count": len(results), "days_ahead": days}
+
+
 TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="get_recent_occurrences",
@@ -109,5 +154,16 @@ TOOLS: list[ToolDefinition] = [
             required=["occurrence_id"],
         ),
         handler=_get_meeting_notes,
+    ),
+    ToolDefinition(
+        name="list_upcoming_meetings",
+        description="List upcoming scheduled meetings (from Google Calendar) with their Meet URLs and assigned series. Use this to answer 'what meetings do I have?' or to help schedule bot attendance.",
+        input_schema=ToolSchema(
+            type="object",
+            properties={
+                "days": {"type": "integer", "description": "How many days ahead to look (default 7, max 30)"},
+            },
+        ),
+        handler=_list_upcoming_meetings,
     ),
 ]

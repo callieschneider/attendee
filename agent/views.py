@@ -188,8 +188,26 @@ def attendee_webhook(request):
 
     elif trigger == "transcript.update":
         # Phase 2 — realtime transcript forwarding to Gemini Live
-        # For Phase 1 we just acknowledge
         return JsonResponse({"ok": True, "ignored": "transcript.update (Phase 2)"})
+
+    elif trigger == "calendar.events_update":
+        # Calendar sync completed — find and schedule upcoming events
+        calendar_id = payload.get("calendar_id") or payload.get("id")
+        if not calendar_id:
+            # Calendar is in the top-level of the delivery (from deliver_webhook_task)
+            # The calendar_id comes from the outer wrapper as calendar_id field
+            log.info("calendar.events_update received, scheduling upcoming event check")
+            from .tasks import sync_upcoming_calendar_events
+            sync_upcoming_calendar_events.delay()
+            return JsonResponse({"ok": True, "dispatched": "sync_upcoming_calendar_events"})
+        from .series_manager import schedule_bot_for_upcoming_events
+        from celery import current_app
+        current_app.send_task("agent.tasks.sync_upcoming_calendar_events")
+        return JsonResponse({"ok": True, "dispatched": "sync_upcoming_calendar_events"})
+
+    elif trigger == "calendar.state_change":
+        log.info("calendar.state_change received: %s", str(payload.get("data", {}))[:100])
+        return JsonResponse({"ok": True, "ignored": "calendar.state_change"})
 
     return JsonResponse({"ok": True, "ignored": trigger})
 
@@ -274,3 +292,113 @@ def live_voice_tool(request):
 
     result = execute_tool(tool_name, tool_input, ctx)
     return JsonResponse({"result": result})
+
+
+# ── Calendar OAuth ─────────────────────────────────────────────────────────────
+
+def calendar_connect(request):
+    """
+    GET /agent/api/calendar/connect
+    Renders a page with the Google OAuth link for the calendar authorization flow.
+    Requires admin login.
+    """
+    from django.contrib.admin.views.decorators import staff_member_required
+    from django.shortcuts import render, redirect
+
+    if not request.user.is_authenticated or not request.user.is_staff:
+        from django.contrib.auth.views import redirect_to_login
+        return redirect_to_login(request.get_full_path())
+
+    from .calendar_oauth import get_oauth_url
+    try:
+        oauth_url = get_oauth_url(request)
+    except ValueError as e:
+        return JsonResponse({"error": str(e), "hint": "Set GOOGLE_OAUTH_CLIENT_ID + GOOGLE_OAUTH_CLIENT_SECRET env vars and redeploy"}, status=500)
+
+    # Simple HTML page with the link — no template needed
+    html = f"""<!DOCTYPE html>
+<html><head><title>Connect Google Calendar</title></head>
+<body style="font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px">
+<h2>Connect Google Calendar</h2>
+<p>Click the button below to authorize <strong>Meeting Agent</strong> to read
+<code>meetingagent@latentspaceco.com</code>'s Google Calendar.</p>
+<p><a href="{oauth_url}" style="background:#4285f4;color:#fff;padding:12px 24px;border-radius:4px;text-decoration:none;display:inline-block">
+Authorize Google Calendar Access</a></p>
+<p style="color:#666;font-size:14px">This grants read-only access to the calendar. No events will be modified.</p>
+</body></html>"""
+    from django.http import HttpResponse
+    return HttpResponse(html)
+
+
+def calendar_callback(request):
+    """
+    GET /agent/api/calendar/callback?code=...
+    Handles the OAuth redirect, exchanges code for tokens, registers calendar with Attendee.
+    """
+    from django.shortcuts import redirect
+    from .calendar_oauth import exchange_code_for_tokens, get_google_user_info, register_calendar_with_attendee
+
+    code = request.GET.get("code")
+    error = request.GET.get("error")
+
+    if error:
+        return JsonResponse({"error": f"OAuth denied: {error}"}, status=400)
+    if not code:
+        return JsonResponse({"error": "No code in callback"}, status=400)
+
+    try:
+        tokens = exchange_code_for_tokens(code, request)
+    except Exception as exc:
+        log.exception("calendar_callback: token exchange failed")
+        return JsonResponse({"error": f"Token exchange failed: {exc}"}, status=500)
+
+    access_token = tokens.get("access_token")
+    refresh_token = tokens.get("refresh_token")
+
+    if not refresh_token:
+        return JsonResponse({
+            "error": "No refresh_token returned. Try visiting /agent/api/calendar/connect again."
+        }, status=400)
+
+    # Get account info for confirmation
+    try:
+        user_info = get_google_user_info(access_token)
+    except Exception:
+        user_info = {}
+
+    # Register calendar with Attendee
+    client_id = getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", "")
+    client_secret = getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", "")
+
+    try:
+        calendar_data = register_calendar_with_attendee(client_id, client_secret, refresh_token)
+        log.info("calendar_callback: registered calendar %s for %s",
+                 calendar_data.get("id"), user_info.get("email"))
+    except Exception as exc:
+        log.exception("calendar_callback: failed to register calendar with Attendee")
+        # Store tokens in env/log for manual recovery
+        log.info("calendar_callback: refresh_token starts with %s", refresh_token[:8])
+        return JsonResponse({"error": f"Calendar registration failed: {exc}", "refresh_token_prefix": refresh_token[:8]}, status=500)
+
+    # Trigger initial sync of upcoming events
+    from .series_manager import schedule_bot_for_upcoming_events
+    calendar_object_id = calendar_data.get("id", "")
+    if calendar_object_id:
+        import threading
+        threading.Thread(
+            target=lambda: schedule_bot_for_upcoming_events(calendar_object_id),
+            daemon=True,
+        ).start()
+
+    from django.http import HttpResponse
+    email = user_info.get("email", "unknown")
+    html = f"""<!DOCTYPE html>
+<html><head><title>Calendar Connected</title></head>
+<body style="font-family:sans-serif;max-width:600px;margin:40px auto;padding:20px">
+<h2>✅ Google Calendar Connected</h2>
+<p>Successfully connected calendar for <strong>{email}</strong>.</p>
+<p>Calendar ID: <code>{calendar_object_id}</code></p>
+<p>Attendee will sync upcoming events and automatically schedule bots for Google Meet calls.</p>
+<p><a href="/admin/">← Back to admin</a></p>
+</body></html>"""
+    return HttpResponse(html)

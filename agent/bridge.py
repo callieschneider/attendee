@@ -59,12 +59,19 @@ async def build_gemini_context(bot_id: str) -> dict:
     def _load():
         series_id = None
         try:
+            from bots.models import Bot
             from agent.models import MeetingOccurrence
-            occ = MeetingOccurrence.objects.filter(
-                bot__object_id=bot_id
-            ).order_by("-created_at").first()
-            if occ:
-                series_id = str(occ.series_id)
+            # 1. Try bot metadata (set at creation by create_meeting_bot / auto_create_bot_for_event)
+            bot = Bot.objects.filter(object_id=bot_id).first()
+            if bot and bot.metadata:
+                series_id = bot.metadata.get("series_id")
+            # 2. Fall back to MeetingOccurrence if metadata doesn't have it
+            if not series_id:
+                occ = MeetingOccurrence.objects.filter(
+                    bot__object_id=bot_id
+                ).order_by("-created_at").first()
+                if occ:
+                    series_id = str(occ.series_id)
         except Exception:
             log.exception("build_gemini_context: failed to load series for bot %s", bot_id)
         return build_context(series_id=series_id)
@@ -156,20 +163,26 @@ async def forward_gemini_to_attendee(gemini_ws, attendee_ws, bot_id: str):
     """
     ctx = {"bot_id": bot_id}
 
-    # Load series_id for tool context
+    # Load series_id + occurrence_id for tool context
     try:
+        from bots.models import Bot
         from agent.models import MeetingOccurrence
 
         @sync_to_async
-        def _get_occ():
-            return MeetingOccurrence.objects.filter(
+        def _get_context():
+            result = {}
+            bot = Bot.objects.filter(object_id=bot_id).first()
+            if bot and bot.metadata and bot.metadata.get("series_id"):
+                result["series_id"] = bot.metadata["series_id"]
+            occ = MeetingOccurrence.objects.filter(
                 bot__object_id=bot_id
             ).order_by("-created_at").first()
+            if occ:
+                result["series_id"] = result.get("series_id") or str(occ.series_id)
+                result["occurrence_id"] = str(occ.id)
+            return result
 
-        occ = await _get_occ()
-        if occ:
-            ctx["series_id"] = str(occ.series_id)
-            ctx["occurrence_id"] = str(occ.id)
+        ctx.update(await _get_context())
     except Exception:
         pass
 

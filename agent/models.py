@@ -23,9 +23,10 @@ class MeetingSeries(models.Model):
     tags = ArrayField(models.CharField(max_length=64), default=list, blank=True)
     is_active = models.BooleanField(default=True)
 
-    # Calendar integration stubs (filled by future calendar plan)
+    # Calendar integration
     rrule = models.CharField(max_length=512, blank=True, default="")
-    google_calendar_event_id = models.CharField(max_length=255, blank=True, default="")
+    google_calendar_id = models.CharField(max_length=255, blank=True, default="")
+    attendee_calendar_id = models.CharField(max_length=64, blank=True, default="")
 
     class Meta:
         db_table = "agent_meeting_series"
@@ -64,6 +65,11 @@ class MeetingOccurrence(models.Model):
     summary = models.TextField(blank=True, default="")
     transcript_text = models.TextField(blank=True, default="")
     attendees = ArrayField(models.CharField(max_length=255), default=list, blank=True)
+
+    # Calendar event linkage
+    calendar_event_object_id = models.CharField(max_length=64, blank=True, default="")
+    google_event_id = models.CharField(max_length=1024, blank=True, default="")
+    google_recurring_event_id = models.CharField(max_length=1024, blank=True, default="")
 
     class Meta:
         db_table = "agent_meeting_occurrence"
@@ -355,3 +361,34 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.role}: {self.content[:60]}"
+
+
+class SeriesRule(models.Model):
+    """
+    Maps a matching rule to a MeetingSeries.
+    When a CalendarEvent is assigned, these rules are checked in priority order.
+    """
+
+    RULE_TYPES = [
+        ("recurring_uid", "Google Calendar recurring event UID (ical_uid)"),
+        ("series_tag", "Description tag (#series:slug)"),
+        ("attendee_set", "Attendee email set match (comma-separated)"),
+        ("title_contains", "Event title contains string"),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    series = models.ForeignKey("MeetingSeries", on_delete=models.CASCADE, related_name="rules")
+    rule_type = models.CharField(max_length=32, choices=RULE_TYPES)
+    rule_value = models.CharField(max_length=1024)
+    priority = models.IntegerField(default=0)  # higher = checked first
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "agent_series_rule"
+        ordering = ["-priority", "created_at"]
+        indexes = [models.Index(fields=["rule_type", "rule_value", "is_active"])]
+
+    def __str__(self):
+        return f"{self.rule_type}:{self.rule_value} → {self.series.title}"
