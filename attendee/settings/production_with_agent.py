@@ -26,3 +26,8 @@ AGENT_DEFAULT_VOICE = os.getenv("AGENT_DEFAULT_VOICE", "Zephyr")
 
 # ---- Attendee webhook secret (for HMAC verification) ----
 ATTENDEE_WEBHOOK_SECRET = os.getenv("ATTENDEE_WEBHOOK_SECRET", "")
+
+# ---- Bridge service settings ----
+BRIDGE_DOMAIN = os.getenv("BRIDGE_DOMAIN", "")  # e.g. meeting-agent-bridge-production.up.railway.app
+AGENT_APP_URL = os.getenv("AGENT_APP_URL", "https://meeting-agent-web-production.up.railway.app")
+ATTENDEE_API_KEY = os.getenv("ATTENDEE_API_KEY", "")

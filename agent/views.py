@@ -1,5 +1,6 @@
 """
 Agent app views:
+- create_meeting_bot: creates an Attendee bot wired to the audio bridge
 - attendee_webhook: receives Attendee bot webhooks, verifies HMAC, dispatches Celery tasks
 - live_voice_token: mints an ephemeral Gemini Live token
 - live_voice_tool: executes a tool call from a live session
@@ -52,6 +53,81 @@ def _get_project_secret(bot_object_id: str) -> bytes | None:
     except Exception:
         log.exception("_get_project_secret: failed to retrieve secret for bot %s", bot_object_id)
     return None
+
+
+@csrf_exempt
+@require_POST
+def create_meeting_bot(request):
+    """
+    Create a bot pre-configured with the audio bridge WebSocket URL.
+    This is the primary way to create bots that use Gemini Live.
+
+    Request body:
+    {"meeting_url": "https://meet.google.com/xxx", "series_id": "uuid?", "bot_name": "?"}
+    """
+    import requests as req
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "malformed"}, status=400)
+
+    meeting_url = body.get("meeting_url", "")
+    if not meeting_url:
+        return JsonResponse({"error": "meeting_url required"}, status=400)
+
+    bridge_domain = getattr(settings, "BRIDGE_DOMAIN", "")
+    if not bridge_domain:
+        return JsonResponse({"error": "BRIDGE_DOMAIN not configured — deploy bridge service first"}, status=500)
+
+    bot_name = body.get("bot_name", "Meeting Agent")
+    series_id = body.get("series_id")
+    api_key = getattr(settings, "ATTENDEE_API_KEY", "")
+    agent_app_url = getattr(settings, "AGENT_APP_URL", "https://meeting-agent-web-production.up.railway.app")
+
+    # Step 1: Create the bot without audio URL to get bot_id
+    initial_payload = {
+        "meeting_url": meeting_url,
+        "bot_name": bot_name,
+        "google_meet_settings": {"use_login": True},
+    }
+    if series_id:
+        initial_payload["metadata"] = {"series_id": series_id}
+
+    try:
+        resp = req.post(
+            f"{agent_app_url}/api/v1/bots",
+            json=initial_payload,
+            headers={"Authorization": f"Token {api_key}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        bot_data = resp.json()
+    except Exception as exc:
+        log.exception("create_meeting_bot: failed to create bot")
+        return JsonResponse({"error": str(exc)}, status=500)
+
+    bot_id = bot_data.get("id", "")
+    if not bot_id:
+        return JsonResponse({"error": "no bot_id in response"}, status=500)
+
+    # Step 2: Patch with real audio bridge URL (contains bot_id)
+    ws_url = f"wss://{bridge_domain}/audio/{bot_id}"
+    try:
+        patch_resp = req.patch(
+            f"{agent_app_url}/api/v1/bots/{bot_id}/voice_agent",
+            json={"websocket_settings": {"audio": {"url": ws_url, "sample_rate": 16000}}},
+            headers={"Authorization": f"Token {api_key}"},
+            timeout=10,
+        )
+        if patch_resp.ok:
+            log.info("create_meeting_bot: patched bot %s with bridge %s", bot_id, ws_url)
+        else:
+            log.warning("create_meeting_bot: PATCH failed (%s) — bot will record without live audio", patch_resp.status_code)
+    except Exception:
+        log.exception("create_meeting_bot: PATCH failed — bot will record without live audio")
+
+    return JsonResponse({**bot_data, "bridge_url": ws_url})
 
 
 @csrf_exempt

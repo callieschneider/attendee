@@ -5,6 +5,9 @@ from . import views
 app_name = "agent"
 
 urlpatterns = [
+    # Create a bot wired to the audio bridge
+    path("api/create-meeting-bot", views.create_meeting_bot, name="create_meeting_bot"),
+
     # Attendee webhook receiver
     path("webhooks/attendee", views.attendee_webhook, name="attendee_webhook"),
 

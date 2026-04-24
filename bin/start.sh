@@ -13,8 +13,11 @@ case "$ROLE" in
   worker)
     exec celery -A attendee worker -l info
     ;;
+  bridge)
+    exec python -m agent.bridge
+    ;;
   *)
-    echo "Unknown SERVICE_ROLE: $ROLE (expected 'web' or 'worker')" >&2
+    echo "Unknown SERVICE_ROLE: $ROLE (expected 'web', 'worker', or 'bridge')" >&2
     exit 1
     ;;
 esac
