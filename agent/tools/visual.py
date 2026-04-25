@@ -15,14 +15,27 @@ from .types import ToolDefinition, ToolSchema
 log = logging.getLogger("agent.tools.visual")
 
 
+def _coerce_spec(spec) -> dict | None:
+    """Accept spec as either a dict or a JSON-encoded string."""
+    if isinstance(spec, dict):
+        return spec
+    if isinstance(spec, str) and spec.strip():
+        try:
+            parsed = json.loads(spec)
+            return parsed if isinstance(parsed, dict) else None
+        except Exception:
+            return None
+    return None
+
+
 def _create_visual(inp: dict, ctx: dict) -> dict:
     from agent.models import Artifact
 
     from ._series_fallback import ensure_series_id
 
-    spec = inp.get("spec")
-    if not isinstance(spec, dict):
-        return {"error": "spec must be an object (dict)"}
+    spec = _coerce_spec(inp.get("spec"))
+    if spec is None:
+        return {"error": "spec must be an object or a JSON string"}
     title = (inp.get("title") or "Visual").strip()
     series_id = ensure_series_id(inp, ctx)
 
@@ -92,11 +105,11 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
     from agent.models import Artifact
 
     visual_id = inp.get("visual_id")
-    spec = inp.get("spec")
+    spec = _coerce_spec(inp.get("spec"))
     if not visual_id:
         return {"error": "visual_id required"}
-    if not isinstance(spec, dict):
-        return {"error": "spec must be an object"}
+    if spec is None:
+        return {"error": "spec must be an object or a JSON string"}
 
     try:
         artifact = Artifact.objects.get(id=visual_id, type="chart")

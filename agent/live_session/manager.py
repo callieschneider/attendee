@@ -43,29 +43,11 @@ GEMINI_OUTPUT_RATE = 24000
 # Tools considered safe to execute DIRECTLY from Gemini Live's toolCall stream
 # (no race conditions with the Turn Processor). All other tools must go through
 # the Turn Processor where they're tracked in ActionLogEntry.
-_LIVE_READ_ONLY_TOOLS = {
-    "get_recent_occurrences",
-    "get_occurrence_transcript",
-    "get_meeting_notes",
-    "list_upcoming_meetings",
-    "get_series_context_bundle",
-    "list_series",
-    "list_tasks",
-    "search_artifacts",
-    "get_artifact",
-    "semantic_search",
-    "web_search",
-    "fetch_url",
-    "read_recent_chat",
-    # Visuals — Gemini Live can call these directly so you can ask for
-    # charts via voice. HTML specs render via Selenium and push immediately.
-    "create_visual",
-    "update_visual",
-    # Other write tools Gemini Live can call inline.
-    "create_task",
-    "send_chat_message",
-    "save_artifact_from_url",
-}
+# All tools are available to Gemini Live (abstrakt's pattern). The Turn
+# Processor still runs in parallel for background actions during longer
+# conversations; the small risk of a duplicate ActionLogEntry is worth
+# the simplicity of "just let Gemini call any tool."
+_LIVE_READ_ONLY_TOOLS = None  # None means "no restriction"
 
 
 class LiveSessionManager:
@@ -286,26 +268,24 @@ class LiveSessionManager:
             name = c.get("name", "")
             args = c.get("args", {}) or {}
             call_id = c.get("id", "")
-            if name not in _LIVE_READ_ONLY_TOOLS:
-                # Not safe to run inline — surface a stub so Gemini doesn't hang.
+            if _LIVE_READ_ONLY_TOOLS is not None and name not in _LIVE_READ_ONLY_TOOLS:
+                # Restriction active and tool not allowed — surface a stub.
                 responses.append(
                     {
                         "id": call_id,
                         "name": name,
                         "response": {
                             "error": (
-                                f"Tool '{name}' is write-mutating. The background Turn "
-                                "Processor handles those; continue listening."
+                                f"Tool '{name}' is not allowed in this session."
                             )
                         },
                     }
                 )
-                # Log the rejection so it shows in the canvas debug UI
                 await self._log_action(
                     name, args,
                     result={},
                     status="error",
-                    error_msg=f"rejected: {name} is write-mutating",
+                    error_msg=f"rejected: {name} not in allowed list",
                 )
                 continue
 
