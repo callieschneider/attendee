@@ -60,17 +60,25 @@ def push_canvas_images(self) -> dict:
 
 
 def _live_bot_ids() -> list[str]:
-    """Return bot_ids that should get canvas updates."""
+    """Return bot_ids of bots currently in a state that can play media."""
     from agent.models import MeetingCursor
+    from bots.models import Bot, BotStates
 
-    # Active = cursor updated in the last ~10 min
-    from datetime import timedelta
-
-    from django.utils import timezone
-
-    cutoff = timezone.now() - timedelta(minutes=10)
+    # Only states that accept output_image (mirrors is_state_that_can_play_media)
+    playable_states = (
+        BotStates.JOINED_RECORDING,
+        BotStates.JOINED_NOT_RECORDING,
+        BotStates.JOINED_RECORDING_PERMISSION_DENIED,
+        BotStates.JOINED_RECORDING_PAUSED,
+    )
+    cursor_bot_ids = set(MeetingCursor.objects.values_list("bot_id", flat=True))
+    if not cursor_bot_ids:
+        return []
     return list(
-        MeetingCursor.objects.filter(updated_at__gte=cutoff).values_list("bot_id", flat=True)
+        Bot.objects.filter(
+            object_id__in=cursor_bot_ids,
+            state__in=playable_states,
+        ).values_list("object_id", flat=True)
     )
 
 

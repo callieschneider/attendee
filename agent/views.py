@@ -119,7 +119,7 @@ def create_meeting_bot(request):
             f"{agent_app_url}/api/v1/bots",
             json=bot_payload,
             headers={"Authorization": f"Token {api_key}"},
-            timeout=10,
+            timeout=60,
         )
         resp.raise_for_status()
         bot_data = resp.json()
