@@ -171,16 +171,19 @@ def _draw_feed(draw, state, L, R, y_top, y_bottom, font_body, font_mono):
             "text": (e.get("text") or "")[:160],
         })
     for a in state.get("actions") or []:
-        if a.get("status") == "error":
+        status = a.get("status", "")
+        if status == "error":
             err = (a.get("error") or "").replace("\n", " ")
             text = f"FAILED: {err[:140]}"
+        elif status == "pending":
+            text = "RUNNING…"
         elif a.get("latency_ms"):
             text = f"OK ({a['latency_ms']}ms)"
         else:
             text = "OK"
         rows.append({
             "ts": a.get("t"),
-            "kind": "action " + (a.get("status") or ""),
+            "kind": "action " + status,
             "who": a.get("tool", "?")[:28],
             "text": text,
         })

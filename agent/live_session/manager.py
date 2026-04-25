@@ -269,25 +269,24 @@ class LiveSessionManager:
             args = c.get("args", {}) or {}
             call_id = c.get("id", "")
             if _LIVE_READ_ONLY_TOOLS is not None and name not in _LIVE_READ_ONLY_TOOLS:
-                # Restriction active and tool not allowed — surface a stub.
                 responses.append(
                     {
                         "id": call_id,
                         "name": name,
                         "response": {
-                            "error": (
-                                f"Tool '{name}' is not allowed in this session."
-                            )
+                            "error": f"Tool '{name}' is not allowed in this session."
                         },
                     }
                 )
-                await self._log_action(
+                await self._log_action_create(
                     name, args,
-                    result={},
                     status="error",
                     error_msg=f"rejected: {name} not in allowed list",
                 )
                 continue
+
+            # Log "pending" IMMEDIATELY so the canvas shows the in-flight action.
+            entry_id = await self._log_action_create(name, args, status="pending")
 
             @sync_to_async
             def _exec(n=name, a=args):
@@ -298,36 +297,29 @@ class LiveSessionManager:
             try:
                 result = await _exec()
                 latency_ms = int((_time.time() - t0) * 1000)
-                # Match abstrakt's tool response shape: must be a dict.
-                # Wrap non-dicts in {"output": ...}.
                 if isinstance(result, dict):
                     response_obj = result
                 else:
                     response_obj = {"output": result}
-
-                if isinstance(result, dict) and result.get("error"):
-                    await self._log_action(
-                        name, args,
-                        result=result,
-                        status="error",
-                        error_msg=str(result.get("error"))[:300],
-                        latency_ms=latency_ms,
-                    )
-                else:
-                    await self._log_action(
-                        name, args,
-                        result=response_obj,
-                        status="ok",
-                        latency_ms=latency_ms,
-                    )
+                is_error = isinstance(result, dict) and result.get("error")
+                await self._log_action_finish(
+                    entry_id,
+                    result=response_obj,
+                    status="error" if is_error else "ok",
+                    error_msg=(str(result.get("error"))[:300] if is_error else ""),
+                    latency_ms=latency_ms,
+                )
                 responses.append({"id": call_id, "name": name, "response": response_obj})
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 latency_ms = int((_time.time() - t0) * 1000)
                 log.exception("live_session: tool %s raised bot=%s", name, self.bot_id)
-                await self._log_action(
-                    name, args, result={}, status="error",
-                    error_msg=err[:300], latency_ms=latency_ms,
+                await self._log_action_finish(
+                    entry_id,
+                    result={"error": err},
+                    status="error",
+                    error_msg=err[:300],
+                    latency_ms=latency_ms,
                 )
                 responses.append({"id": call_id, "name": name, "response": {"error": err}})
 
@@ -339,17 +331,14 @@ class LiveSessionManager:
         except Exception:
             log.exception("live_session: tool response send failed bot=%s", self.bot_id)
 
-    async def _log_action(
+    async def _log_action_create(
         self,
         tool_name: str,
         tool_input: dict,
-        result: dict,
-        status: str,
+        status: str = "pending",
         error_msg: str = "",
-        latency_ms: int | None = None,
-    ) -> None:
-        """Persist an ActionLogEntry for a Gemini Live tool call so it shows in
-        the canvas debug UI alongside Turn Processor actions."""
+    ) -> str | None:
+        """Create an ActionLogEntry up-front so the canvas shows the in-flight tool call."""
         import uuid as _uuid
 
         @sync_to_async
@@ -357,23 +346,56 @@ class LiveSessionManager:
             try:
                 from agent.models import ActionLogEntry
 
-                ActionLogEntry.objects.create(
+                e = ActionLogEntry.objects.create(
                     bot_id=self.bot_id,
                     turn_id=_uuid.uuid4(),
                     tool_name=tool_name,
                     tool_input=tool_input or {},
+                    tool_result={},
+                    status=status,
+                    error_message=error_msg or "",
+                )
+                return str(e.id)
+            except Exception:
+                log.exception("_log_action_create: failed bot=%s tool=%s", self.bot_id, tool_name)
+                return None
+
+        try:
+            return await _save()
+        except Exception:
+            log.exception("_log_action_create: wrapper failed")
+            return None
+
+    async def _log_action_finish(
+        self,
+        entry_id: str | None,
+        result: dict,
+        status: str,
+        error_msg: str = "",
+        latency_ms: int | None = None,
+    ) -> None:
+        """Update an existing ActionLogEntry to its final status."""
+        if not entry_id:
+            return
+
+        @sync_to_async
+        def _save():
+            try:
+                from agent.models import ActionLogEntry
+
+                ActionLogEntry.objects.filter(id=entry_id).update(
                     tool_result=result or {},
                     status=status,
                     error_message=error_msg or "",
                     latency_ms=latency_ms,
                 )
             except Exception:
-                log.exception("_log_action: persist failed bot=%s tool=%s", self.bot_id, tool_name)
+                log.exception("_log_action_finish: failed entry=%s", entry_id)
 
         try:
             await _save()
         except Exception:
-            log.exception("_log_action: wrapper failed")
+            log.exception("_log_action_finish: wrapper failed")
 
     async def _attendee_audio_pump(self) -> None:
         """Forward Attendee audio into Gemini Live iff gate is open."""

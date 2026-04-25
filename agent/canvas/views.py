@@ -100,8 +100,8 @@ def _snapshot_state(bot_id: str) -> dict:
     )
     actions.reverse()
 
-    # Any in-flight action (pending) is "thinking"
-    thinking = any(a.status == "pending" for a in actions[-3:])
+    # Any in-flight action across the whole recent log is "thinking"
+    thinking = any(a.status == "pending" for a in actions)
 
     # Latest chart artifact for the bot's series, if any
     visual = _latest_visual_for_bot(bot_id)
