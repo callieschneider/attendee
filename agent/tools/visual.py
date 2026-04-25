@@ -31,18 +31,61 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
             series_id=series_id,
             title=title[:255],
             type="chart",
-            content=json.dumps(spec)[:10000],
+            content=json.dumps(spec)[:50000],  # generous limit for HTML
         )
     except Exception as exc:
         log.exception("create_visual: failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
 
+    # Pre-render HTML specs immediately so the canvas updates right away
+    # (instead of waiting for the 3s pump cycle to re-render).
+    if spec.get("type") == "html" and spec.get("html"):
+        _render_html_and_push(artifact, ctx.get("bot_id"))
+
     return {
         "success": True,
         "visual_id": str(artifact.id),
         "rendered": True,
-        "message": "Done. The visual is now on the video feed. Tell the user it's up.",
+        "message": "Done. Visual is up.",
     }
+
+
+def _render_html_and_push(artifact, bot_id: str | None) -> None:
+    """
+    Immediately render an HTML spec artifact to PNG and push it to the
+    bot's video feed. Best-effort — never raises.
+    """
+    if not bot_id:
+        return
+    try:
+        import base64
+        import requests
+        from django.conf import settings
+        from agent.canvas.html_renderer import render_html_to_png
+        import json
+
+        spec = json.loads(artifact.content or "{}")
+        html = spec.get("html", "")
+        if not html:
+            return
+
+        png = render_html_to_png(html)
+        if not png:
+            log.warning("_render_html_and_push: renderer returned None bot=%s", bot_id)
+            return
+
+        api_key = getattr(settings, "ATTENDEE_API_KEY", "")
+        api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
+        resp = requests.post(
+            f"{api_base}/api/v1/bots/{bot_id}/output_image",
+            headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
+            json={"type": "image/png", "data": base64.b64encode(png).decode()},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            log.warning("_render_html_and_push: HTTP %s bot=%s", resp.status_code, bot_id)
+    except Exception:
+        log.exception("_render_html_and_push: failed bot=%s", bot_id)
 
 
 def _update_visual(inp: dict, ctx: dict) -> dict:
@@ -59,13 +102,18 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
         artifact = Artifact.objects.get(id=visual_id, type="chart")
     except Artifact.DoesNotExist:
         return {"error": f"visual {visual_id} not found"}
-    artifact.content = json.dumps(spec)[:10000]
+    artifact.content = json.dumps(spec)[:50000]
     artifact.save(update_fields=["content", "updated_at"])
+
+    # Immediately push HTML renders
+    if spec.get("type") == "html" and spec.get("html"):
+        _render_html_and_push(artifact, ctx.get("bot_id"))
+
     return {
         "success": True,
         "updated": True,
         "visual_id": visual_id,
-        "message": "Done. The visual has been updated. Tell the user it's done.",
+        "message": "Done. Visual updated.",
     }
 
 

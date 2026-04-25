@@ -41,7 +41,7 @@ SPEAKER_CHAT = (249, 168, 212)
 SPEAKER_ACTION = (252, 211, 77)
 
 
-def render_canvas_png(bot_id: str) -> bytes:
+def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
     """
     Produce a PNG (bytes) representing the current canvas state for `bot_id`.
     Returns a minimal branded image if Pillow or the state snapshot is
@@ -73,7 +73,28 @@ def render_canvas_png(bot_id: str) -> bytes:
     font_mono_small = _load_font(11, mono=True)
 
     _draw_debug_pane(draw, state, font_title, font_h2, font_body, font_small, font_mono, font_mono_small)
-    _draw_viz_pane(draw, state, font_title, font_h2, font_body, font_mono_small)
+
+    # For HTML-spec visuals, use Selenium to render into the right pane
+    visual = state.get("visual")
+    html_rendered = False
+    if use_html_renderer and visual:
+        spec = visual.get("spec") or {}
+        if spec.get("type") == "html" and spec.get("html"):
+            try:
+                from .html_renderer import render_html_to_png
+                html_png = render_html_to_png(spec["html"])
+                if html_png:
+                    from PIL import Image as _Image
+                    import io as _io
+                    pane = _Image.open(_io.BytesIO(html_png)).convert("RGB")
+                    pane = pane.resize((_WIDTH // 2, _HEIGHT), _Image.LANCZOS)
+                    img.paste(pane, (_WIDTH // 2, 0))
+                    html_rendered = True
+            except Exception:
+                log.exception("render_canvas_png: html render failed bot=%s", bot_id)
+
+    if not html_rendered:
+        _draw_viz_pane(draw, state, font_title, font_h2, font_body, font_mono_small)
 
     # Divider
     draw.line([(_WIDTH // 2, 0), (_WIDTH // 2, _HEIGHT)], fill=BORDER, width=1)

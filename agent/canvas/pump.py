@@ -87,7 +87,7 @@ def _push_one(bot_id: str, api_base: str, api_key: str) -> tuple[bool, bool]:
     from .renderer import render_canvas_png
 
     try:
-        png = render_canvas_png(bot_id)
+        png = render_canvas_png(bot_id, use_html_renderer=True)
     except Exception:
         log.exception("push_canvas_images: render failed bot=%s", bot_id)
         return False, False

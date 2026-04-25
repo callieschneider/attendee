@@ -116,20 +116,21 @@ def _process_turn(
         budget_cap = cursor.budget_cap_usd
         current_cost = cursor.total_cost_usd
 
-    # Snapshot audio gate state — if open, Gemini Live is already conversing
-    # with the user in real time. The Turn Processor should focus on silent
-    # actions (tasks, artifacts, URLs) and NOT duplicate voice replies.
-    # Prefer the Redis flag (set synchronously when gate opens) over the DB
-    # cursor field (persisted asynchronously by the bridge process).
-    voice_conversation_active = False
+    # Haiku is the brain for ALL tool calls and decisions.
+    # "voice_conversation_active" just tells it whether the gate is open
+    # (i.e., user is in active conversation) vs passive monitoring.
+    # Either way, Haiku can speak — it's no longer suppressed.
+    # The gate just tells us whether to prioritize a spoken reply.
+    gate_open = False
     try:
         from agent.live_session.signals import is_gate_open
 
-        voice_conversation_active = is_gate_open(bot_id)
+        gate_open = is_gate_open(bot_id)
     except Exception:
         log.exception("turn: gate-state check failed bot=%s", bot_id)
-    if not voice_conversation_active:
-        voice_conversation_active = bool(cursor.audio_gate_open)
+    if not gate_open:
+        gate_open = bool(cursor.audio_gate_open)
+    voice_conversation_active = gate_open
 
     # ── Build context + call Flash ────────────────────────────────────────────
     ctx_result = build_context(bot_id=bot_id, task="live_turn")
@@ -183,29 +184,16 @@ def _process_turn(
         if not _is_tool_allowed(tool_name, ctx_result.get("series")):
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
             continue
-        # Voice conversations: Turn Processor is silent. Gemini Live handles
-        # the spoken back-and-forth in real time. Turn Processor only does
-        # silent side actions (tasks, artifacts, etc).
-        if voice_conversation_active and tool_name in ("speak_via_voice", "send_chat_message"):
-            log.info(
-                "turn: SUPPRESS %s — voice conversation active bot=%s",
-                tool_name, bot_id,
-            )
-            continue
-        # Channel routing for non-voice triggers.
+        # Haiku is the brain — it always handles tool calls.
+        # Only routing rule: chat trigger → chat reply, voice trigger → voice reply.
         if trigger_kind == "chat" and tool_name == "speak_via_voice":
-            log.info(
-                "turn: rewriting speak_via_voice → send_chat_message (chat trigger) bot=%s",
-                bot_id,
-            )
             tool_name = "send_chat_message"
             tool_input = {"text": tool_input.get("text", ""), "to": "everyone"}
+            log.info("turn: rerouted speak_via_voice → send_chat_message (chat trigger) bot=%s", bot_id)
         elif trigger_kind == "voice" and tool_name == "send_chat_message":
-            log.info(
-                "turn: SUPPRESS send_chat_message (voice trigger, Gemini Live handles) bot=%s",
-                bot_id,
-            )
-            continue
+            tool_name = "speak_via_voice"
+            tool_input = {"text": tool_input.get("text", "")}
+            log.info("turn: rerouted send_chat_message → speak_via_voice (voice trigger) bot=%s", bot_id)
 
         entry = ActionLogEntry.objects.create(
             bot_id=bot_id,
@@ -467,35 +455,42 @@ def _render_user_prompt(
 
     if is_chat:
         lines.append(
-            "## Chat reply required"
-            "\nThe user addressed you in chat. Reply via `send_chat_message` "
-            "with a short (1–2 sentences) helpful message. Do NOT call "
-            "`speak_via_voice` — chat stays in chat."
+            "## Chat reply\n"
+            "The user addressed you in chat. Use `send_chat_message`. Keep it 1–2 sentences."
         )
     elif voice_conversation_active:
         lines.append(
-            "## Background actions only — voice conversation is live\n"
-            "Gemini Live is currently having a conversation with the user via "
-            "voice. Your job is to handle SILENT background tasks the voice "
-            "model is too small to do well: capturing tasks, saving URLs, "
-            "creating non-trivial visualizations.\n\n"
-            "**Tools you should use:**\n"
-            "- `create_task` — when the user clearly states an action item.\n"
-            "- `save_artifact_from_url` — when a URL is shared and worth saving.\n"
-            "- `create_artifact` — when the user says 'save this' or similar.\n"
-            "- `create_visual` — ONLY for complex visualizations the voice "
-            "  model would struggle with (large data sets, complex tables).\n\n"
-            "**Tools you must NOT use:**\n"
-            "- `speak_via_voice` — Gemini Live handles spoken replies.\n"
-            "- `send_chat_message` — only if the user was addressing you in chat.\n\n"
-            "If the chunk has nothing actionable, reply with exactly 'noop'."
+            "## YOU ARE THE BRAIN — the user is talking to you\n"
+            "Gemini Live is a pure voice renderer with NO reasoning, NO tools. "
+            "You (Haiku) are 100% responsible for deciding what to say and do.\n\n"
+            "**Your job this turn:**\n"
+            "1. Read the latest user utterance carefully.\n"
+            "2. Use whatever tools you need to fulfill the request.\n"
+            "3. Call `speak_via_voice` with a SHORT spoken reply (1-2 sentences max).\n"
+            "4. If the user asked for a visual: call `create_visual` WITH a full rich "
+            "   HTML spec (see below), THEN call `speak_via_voice` confirming it's up.\n\n"
+            "**Visualizations — generate RICH HTML:**\n"
+            "- Use spec type 'html' with a complete self-contained HTML page.\n"
+            "- Include inline CSS, real data, beautiful layout. Dark background (#0a0b0f) "
+            "  with light text (#e5e7eb). Accent color: #a5b4fc.\n"
+            "- Charts: use inline SVG bars/lines. Tables: styled. Lists: clean bullets.\n"
+            "- NO external resources — everything inline.\n"
+            "- Example: {\"type\": \"html\", \"html\": \"<!DOCTYPE html><html>...\", \"title\": \"...\"}\n\n"
+            "**Decision rules:**\n"
+            "- If the user asks to 'show', 'display', 'chart', 'visualize' anything → "
+            "  immediately build the best HTML you can and call create_visual.\n"
+            "- If the user asks a question → answer it with speak_via_voice.\n"
+            "- If there's a clear action item → create_task, then confirm via voice.\n"
+            "- Stay decisive: when given freedom ('you decide'), pick the best option and do it.\n"
+            "- NEVER say you can't do something unless the tool returned an actual error."
         )
     else:
         lines.append(
-            "## Background actions\n"
-            "Look for actionable items in the chunk: clear tasks, shared URLs, "
+            "## Background scan\n"
+            "The user is not actively addressing you. Quietly capture any clear "
+            "action items (create_task), shared URLs (save_artifact_from_url), or "
             "decisions worth saving. If nothing stands out, reply 'noop'.\n"
-            "Do NOT call `speak_via_voice` — Gemini Live handles voice replies."
+            "Do NOT call speak_via_voice unless the user clearly addressed you."
         )
 
     lines.append("")

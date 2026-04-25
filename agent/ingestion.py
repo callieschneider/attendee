@@ -268,8 +268,7 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
         log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
-    # Skip classifier + scheduler entirely for self-utterances — but the
-    # event itself stays in DB so it appears in the canvas debug UI.
+    # Skip classifier + scheduler entirely for self-utterances.
     if is_self:
         return {
             "kind": "speech",
@@ -278,11 +277,12 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
             "self_utterance": True,
         }
 
-    # Direct-address detection → open the audio gate (best-effort)
-    _maybe_open_gate_on_address(bot_id, text)
-
-    # Fire-and-forget schedule — never blocks the webhook
-    _schedule_turn_safely(bot_id)
+    # Direct-address → open gate AND fire high-priority turn immediately.
+    # Haiku needs to get the request ASAP to decide what to say and speak.
+    if _maybe_open_gate_on_address(bot_id, text):
+        _schedule_turn_safely(bot_id, priority="voice_direct")
+    else:
+        _schedule_turn_safely(bot_id)
 
     return {
         "kind": "speech",
@@ -330,7 +330,8 @@ def _is_self_speech(bot_id: str, speaker_name: str) -> bool:
     return name_lower in self_names
 
 
-def _maybe_open_gate_on_address(bot_id: str, text: str) -> None:
+def _maybe_open_gate_on_address(bot_id: str, text: str) -> bool:
+    """Returns True if the gate was opened (direct address detected)."""
     """
     If the utterance directly addresses the agent, open the audio gate.
     Runs the classifier synchronously — cheap string pre-filter prevents
@@ -341,8 +342,10 @@ def _maybe_open_gate_on_address(bot_id: str, text: str) -> None:
 
         if is_addressed(text):
             _open_gate_safely(bot_id, reason="direct_address", ttl_seconds=20)
+            return True
     except Exception:
         log.exception("_maybe_open_gate_on_address: classifier failed bot=%s", bot_id)
+    return False
 
 
 def _open_gate_safely(bot_id: str, reason: str, ttl_seconds: int = 30) -> None:

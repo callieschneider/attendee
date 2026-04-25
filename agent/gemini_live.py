@@ -36,36 +36,20 @@ _LIVE_READ_ONLY_TOOL_NAMES = {
 }
 
 
-def _gather_tool_schemas_for_gemini_live() -> list[dict]:
-    """
-    Only READ-ONLY tools are exposed directly to Gemini Live. All mutating
-    tools go through the Turn Processor to preserve ActionLogEntry integrity.
-    See plan §11 (Landmines / tool split).
-    """
-    return [
-        to_gemini_declaration(t)
-        for name, t in TOOL_REGISTRY.items()
-        if name in _LIVE_READ_ONLY_TOOL_NAMES
-    ]
-
-
 def build_live_setup(
     system_prompt: str,
-    voice: str = "Zephyr",
+    voice: str = "Kore",
     session_resumption_handle: str | None = None,
-    enable_transcriptions: bool = True,
 ) -> dict:
     """
-    Build the bidiGenerateContentSetup message.
-    This is sent as the first frame when opening a Gemini Live WebSocket.
+    Build the Gemini Live setup message.
 
-    Optional `session_resumption_handle` lets us reopen an existing session
-    transparently after the ~10-minute cap (the value comes from Gemini's
-    own sessionResumptionUpdate messages).
+    Gemini Live is a PURE VOICE RENDERER in this architecture.
+    - NO tools: Haiku (Turn Processor) handles all tool calls and decisions.
+    - NO transcriptions: we have Attendee's transcript; extra cost isn't worth it.
+    - Gemini Live just speaks whatever Haiku tells it to via realtimeInput.text.
     """
-    model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
-
-    tool_declarations = _gather_tool_schemas_for_gemini_live()
+    model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-09-2025")
 
     setup: dict = {
         "model": f"models/{model}",
@@ -75,21 +59,14 @@ def build_live_setup(
                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
             },
         },
-        # Gemini Live handles VAD and interrupts natively when audio is streamed
-        # continuously — no explicit config needed for v1alpha.
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "tools": [{"functionDeclarations": tool_declarations}] if tool_declarations else [],
+        # No tools — all decisions go through Haiku Turn Processor.
+        "tools": [],
     }
 
-    # Session resumption — always included so Gemini tells us the handle
     setup["sessionResumption"] = (
         {"handle": session_resumption_handle} if session_resumption_handle else {}
     )
-
-    # Native transcriptions (useful for verification + debugging)
-    if enable_transcriptions:
-        setup["inputAudioTranscription"] = {}
-        setup["outputAudioTranscription"] = {}
 
     return {"setup": setup}
 
