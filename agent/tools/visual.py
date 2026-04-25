@@ -102,21 +102,45 @@ def _render_html_and_push(artifact, bot_id: str | None) -> None:
 
 
 def _update_visual(inp: dict, ctx: dict) -> dict:
+    """
+    Update an existing visual. Robust to hallucinated IDs: if the given
+    ID doesn't exist, falls back to updating the most-recent visual for
+    the series. If there's no visual at all, creates a new one.
+    """
     from agent.models import Artifact
 
-    visual_id = inp.get("visual_id")
     spec = _coerce_spec(inp.get("spec"))
-    if not visual_id:
-        return {"error": "visual_id required"}
     if spec is None:
         return {"error": "spec must be an object or a JSON string"}
+    visual_id = inp.get("visual_id")
 
-    try:
-        artifact = Artifact.objects.get(id=visual_id, type="chart")
-    except Artifact.DoesNotExist:
-        return {"error": f"visual {visual_id} not found"}
+    artifact = None
+    if visual_id:
+        try:
+            artifact = Artifact.objects.get(id=visual_id, type="chart")
+        except (Artifact.DoesNotExist, ValueError):
+            log.info("update_visual: id %s not found, falling back to latest", visual_id)
+            artifact = None
+
+    if artifact is None:
+        # Find the most recent chart for this bot's series
+        from ._series_fallback import ensure_series_id
+
+        series_id = ensure_series_id(inp, ctx)
+        artifact = (
+            Artifact.objects.filter(type="chart", series_id=series_id, is_deleted=False)
+            .order_by("-updated_at")
+            .first()
+        )
+
+    if artifact is None:
+        # No existing visual — create one
+        return _create_visual({"spec": spec, "title": inp.get("title", "Visual")}, ctx)
+
     artifact.content = json.dumps(spec)[:50000]
-    artifact.save(update_fields=["content", "updated_at"])
+    if inp.get("title"):
+        artifact.title = inp["title"][:255]
+    artifact.save(update_fields=["content", "title", "updated_at"])
 
     # Immediately push HTML renders
     if spec.get("type") == "html" and spec.get("html"):
@@ -125,7 +149,7 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
     return {
         "success": True,
         "updated": True,
-        "visual_id": visual_id,
+        "visual_id": str(artifact.id),
         "message": "Done. Visual updated.",
     }
 
