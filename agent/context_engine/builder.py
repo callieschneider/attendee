@@ -114,6 +114,10 @@ def build_context(
         sections.append(formatter.format_action_log(action_log))
     else:  # initial_voice_setup
         sections.append(formatter.format_current_occurrence(current_occ))
+        # Include recent transcript so a session resume after Gemini Live's
+        # ~10-min cap doesn't lose memory of the in-progress conversation.
+        sections.append(formatter.format_transcript(transcript, max_events=20))
+        sections.append(formatter.format_action_log(action_log))
     sections.append(formatter.format_recent_meetings(recent_meetings))
     sections.append(formatter.format_open_tasks(open_tasks))
     sections.append(formatter.format_relevant_artifacts(artifacts))
