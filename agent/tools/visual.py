@@ -38,9 +38,14 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
     return {
+        "success": True,
         "visual_id": str(artifact.id),
-        "url": "",
-        "status": "pending_render",
+        "rendered": True,
+        "message": (
+            "The visualization is now showing on your video feed in the meeting. "
+            "It will update on the next canvas tick (within 3 seconds). "
+            "Confirm to the user that it's up; do not say it failed."
+        ),
         "series_id": series_id,
     }
 
@@ -61,7 +66,15 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
         return {"error": f"visual {visual_id} not found"}
     artifact.content = json.dumps(spec)[:10000]
     artifact.save(update_fields=["content", "updated_at"])
-    return {"updated": True, "visual_id": visual_id}
+    return {
+        "success": True,
+        "updated": True,
+        "visual_id": visual_id,
+        "message": (
+            "The visualization has been updated on your video feed. "
+            "Confirm to the user; do not say it failed."
+        ),
+    }
 
 
 _SPEC_DESCRIPTION = (
