@@ -392,10 +392,15 @@ class LiveSessionManager:
             log.exception("live_session: realtimeInput.text send failed bot=%s", self.bot_id)
 
     async def _speak_directive(self, text: str) -> None:
-        """Open audio gate + push directive text to trigger Gemini speech."""
+        """
+        Proactive speech — push the text into Gemini Live as if it were
+        the agent's own thought-in-progress, so it flows out naturally.
+        Open the audio gate first so the TTS is actually emitted to the meeting.
+        """
         await self.gate.open(reason="speak_via_voice", ttl_seconds=20)
-        directive = f"[DIRECTIVE: speak the following out loud, naturally] {text}"
-        await self._push_realtime_text(directive)
+        # Phrase it as something Gemini Live would naturally produce next.
+        # Using plain text here avoids Gemini treating it as a command/instruction.
+        await self._push_realtime_text(text)
 
     # ── Persistence (MeetingCursor) ──────────────────────────────────────────
 

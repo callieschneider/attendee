@@ -16,9 +16,9 @@ log = logging.getLogger("agent.tools.utility")
 # ── Web search via DuckDuckGo ─────────────────────────────────────────────────
 
 def _web_search(inp: dict, ctx: dict) -> dict:
-    """Search the web using DuckDuckGo's HTML search. No API key required."""
-    import re
+    """Search the web via Firecrawl /v1/search."""
     import requests
+    from django.conf import settings
 
     query = inp.get("query", "").strip()
     limit = min(int(inp.get("limit", 5)), 10)
@@ -26,54 +26,46 @@ def _web_search(inp: dict, ctx: dict) -> dict:
     if not query:
         return {"error": "query required"}
 
+    api_key = getattr(settings, "FIRECRAWL_API_KEY", "") or ""
+    if not api_key:
+        return {"error": "FIRECRAWL_API_KEY not configured"}
+
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; MeetingAgent/1.0)",
-        }
-        resp = requests.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers=headers,
-            timeout=10,
+        resp = requests.post(
+            "https://api.firecrawl.dev/v1/search",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"query": query, "limit": limit},
+            timeout=20,
         )
         resp.raise_for_status()
-
-        # Extract results from HTML using simple regex (avoid BS4 dep)
-        # DuckDuckGo HTML results contain <a class="result__a" href="...">title</a>
-        results = []
-        # Find result blocks
-        title_pattern = re.compile(r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
-        snippet_pattern = re.compile(r'<a[^>]+class="result__snippet"[^>]*>(.*?)</a>', re.DOTALL)
-
-        titles_hrefs = title_pattern.findall(resp.text)
-        snippets = snippet_pattern.findall(resp.text)
-
-        for i, (href, title) in enumerate(titles_hrefs[:limit]):
-            title_clean = re.sub(r'<[^>]+>', '', title).strip()
-            snippet = re.sub(r'<[^>]+>', '', snippets[i]).strip() if i < len(snippets) else ""
-            # DuckDuckGo sometimes uses redirect URLs — extract the real URL
-            if "uddg=" in href:
-                import urllib.parse
-                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-                href = parsed.get("uddg", [href])[0]
-                href = urllib.parse.unquote(href)
-            results.append({
-                "title": title_clean,
-                "url": href,
-                "snippet": snippet[:300],
-            })
-
-        return {"results": results, "count": len(results), "query": query}
-
+        body = resp.json()
+    except requests.HTTPError as exc:
+        log.warning("web_search: firecrawl HTTP %s — %s", exc.response.status_code, exc.response.text[:200])
+        return {"error": f"Search failed: HTTP {exc.response.status_code}"}
     except Exception as exc:
-        log.exception("web_search failed for query: %s", query)
+        log.exception("web_search: firecrawl call failed")
         return {"error": f"Search failed: {exc}"}
+
+    raw = body.get("data") or []
+    # Firecrawl's /v1/search returns a list with url, title, description
+    results = []
+    for r in raw[:limit]:
+        results.append({
+            "title": r.get("title", "") or r.get("metadata", {}).get("title", ""),
+            "url": r.get("url", ""),
+            "snippet": (r.get("description", "") or r.get("content", ""))[:300],
+        })
+    return {"results": results, "count": len(results), "query": query}
 
 
 def _fetch_url(inp: dict, ctx: dict) -> dict:
-    """Fetch a URL and return a summarized text version of the page."""
+    """Fetch a URL via Firecrawl /v1/scrape, with plain-requests fallback."""
     import re
     import requests
+    from django.conf import settings
 
     url = inp.get("url", "").strip()
     if not url:
@@ -81,6 +73,29 @@ def _fetch_url(inp: dict, ctx: dict) -> dict:
 
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+
+    api_key = getattr(settings, "FIRECRAWL_API_KEY", "") or ""
+    if api_key:
+        try:
+            fcr = requests.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+                timeout=30,
+            )
+            fcr.raise_for_status()
+            body = fcr.json()
+            data = body.get("data") or {}
+            text = (data.get("markdown") or "").strip()
+            if text:
+                return {
+                    "url": url,
+                    "title": (data.get("metadata") or {}).get("title", ""),
+                    "content": text[:8000],
+                    "truncated": len(text) > 8000,
+                }
+        except Exception:
+            log.exception("fetch_url: firecrawl call failed; falling back to plain GET url=%s", url)
 
     try:
         resp = requests.get(

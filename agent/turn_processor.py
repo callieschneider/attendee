@@ -183,14 +183,16 @@ def _process_turn(
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
             continue
         # If a voice conversation is already in progress, Gemini Live is
-        # handling spoken replies — the Turn Processor must NOT also speak.
-        if voice_conversation_active and tool_name == "speak_via_voice":
+        # handling spoken replies — the Turn Processor must NOT also speak
+        # OR send chat messages (that would be a double-reply).
+        if voice_conversation_active and tool_name in ("speak_via_voice", "send_chat_message"):
             log.info(
-                "turn: SUPPRESS speak_via_voice — voice conversation active bot=%s",
-                bot_id,
+                "turn: SUPPRESS %s — voice conversation active bot=%s",
+                tool_name, bot_id,
             )
             continue
-        # Hard routing: chat trigger → chat reply; voice trigger → voice reply.
+        # Hard routing: chat trigger → chat reply (if any); voice trigger
+        # should never use the Turn Processor for spoken output.
         if trigger_kind == "chat" and tool_name == "speak_via_voice":
             log.info(
                 "turn: rewriting speak_via_voice → send_chat_message (chat trigger) bot=%s",
@@ -199,12 +201,12 @@ def _process_turn(
             tool_name = "send_chat_message"
             tool_input = {"text": tool_input.get("text", ""), "to": "everyone"}
         elif trigger_kind == "voice" and tool_name == "send_chat_message":
+            # Voice trigger should NOT produce chat — Gemini Live replies by voice.
             log.info(
-                "turn: rewriting send_chat_message → speak_via_voice (voice trigger) bot=%s",
+                "turn: SUPPRESS send_chat_message (voice trigger, Gemini Live handles reply) bot=%s",
                 bot_id,
             )
-            tool_name = "speak_via_voice"
-            tool_input = {"text": tool_input.get("text", "")}
+            continue
 
         entry = ActionLogEntry.objects.create(
             bot_id=bot_id,
@@ -460,42 +462,40 @@ def _render_user_prompt(
         lines.append(f"- {ts} {prefix} {ev.get('speaker', '?')}: {ev.get('text', '')}")
     lines.append("")
 
-    # Channel-routing instructions — the single most important decision.
     is_chat = priority == "chat" or any(
         e.get("kind") == "chat" for e in chunk_events[-3:]
     )
+
     if is_chat:
         lines.append(
-            "## Response channel: CHAT"
-            "\nThe user addressed you in chat. Reply using `send_chat_message` "
-            "only. Do NOT call `speak_via_voice` for a chat message — that would "
-            "be jarring. Keep the reply to 1–2 short sentences."
+            "## Chat reply required"
+            "\nThe user addressed you in chat. Reply via `send_chat_message` "
+            "with a short (1–2 sentences) helpful message. Do NOT call "
+            "`speak_via_voice` — chat stays in chat."
         )
     elif voice_conversation_active:
         lines.append(
-            "## Voice conversation in progress — DO NOT duplicate speech"
-            "\nThe audio gate is open and Gemini Live is already conversing with "
-            "the user in real time. You should NOT call `speak_via_voice`. "
-            "Focus only on SILENT actions that Gemini Live can't do itself: "
-            "`create_task`, `promote_meeting_task`, `save_artifact_from_url`, "
-            "`create_artifact`, `send_email_summary`. If nothing warrants a "
-            "silent action, reply with exactly 'noop'."
+            "## Voice conversation is live — do NOT speak"
+            "\nGemini Live is handling the spoken conversation right now. "
+            "Your ONLY job this turn is silent actions: capture tasks, "
+            "save artifacts, save URLs, queue emails. You MUST NOT call "
+            "`speak_via_voice` or `send_chat_message`. If nothing in the "
+            "chunk warrants a silent action, reply with exactly 'noop'."
         )
     else:
         lines.append(
-            "## Response channel: VOICE"
-            "\nIf you need to respond, use `speak_via_voice` only. Do NOT call "
-            "`send_chat_message` for a voice interaction — keep channels aligned. "
-            "Spoken replies should be short (under ~25 words) and conversational."
+            "## Consider the chunk"
+            "\nScan for actionable items: tasks, decisions, shared URLs. "
+            "If nothing clearly stands out, reply 'noop' and take no action. "
+            "Do NOT call `speak_via_voice` unless there's a specific reason "
+            "to interject (e.g., flagging privacy risk) — normal replies "
+            "happen via Gemini Live's voice path, not through you."
         )
 
     lines.append("")
     lines.append(
-        "## When to act"
-        "\n- If the most recent utterance is directly addressed to you, respond in the channel above."
-        "\n- If a clear action item was stated, call `create_task` or `promote_meeting_task`."
-        "\n- If a URL worth saving was shared, call `save_artifact_from_url`."
-        "\n- Otherwise, **make no tool calls and return a single-word reply: 'noop'**. "
-        "Do NOT call `speak_via_voice` just to acknowledge something. Prefer silence."
+        "## Rules"
+        "\n- Never fabricate UUIDs; use tool results."
+        "\n- Prefer silence. 'noop' is always a valid response."
     )
     return "\n".join(lines)

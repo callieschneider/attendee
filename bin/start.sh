@@ -13,7 +13,9 @@ case "$ROLE" in
     exec gunicorn attendee.wsgi --bind "0.0.0.0:${PORT:-8000}" --workers 2 --timeout 120
     ;;
   worker)
-    exec celery -A attendee worker -l info
+    # -B runs celery beat inside the same process (no separate service needed).
+    # Agent beat schedule: canvas image pump (see production_with_agent.py).
+    exec celery -A attendee worker -B -l info
     ;;
   bridge)
     exec python -m agent.bridge

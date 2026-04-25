@@ -20,6 +20,7 @@ INSTALLED_APPS = list(INSTALLED_APPS) + [
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 AGENT_EMBEDDING_MODEL = "text-embedding-3-small"
 AGENT_EMBEDDING_DIMS = 1536
 AGENT_SUMMARIZER_MODEL = os.getenv("AGENT_SUMMARIZER_MODEL", "google/gemini-2.5-flash")
@@ -34,6 +35,14 @@ AGENT_CLASSIFIER_MODEL = os.getenv("AGENT_CLASSIFIER_MODEL", "google/gemini-2.5-
 AGENT_TURN_WINDOW_SECONDS = float(os.getenv("AGENT_TURN_WINDOW_SECONDS", "8"))
 AGENT_PAUSE_THRESHOLD_SECONDS = float(os.getenv("AGENT_PAUSE_THRESHOLD_SECONDS", "2.0"))
 AGENT_PAUSE_MIN_CONTENT_SECONDS = float(os.getenv("AGENT_PAUSE_MIN_CONTENT_SECONDS", "6.0"))
+
+# Celery Beat schedule — runs inside the worker process (celery -B flag).
+CELERY_BEAT_SCHEDULE = {
+    "agent-canvas-pump": {
+        "task": "agent.canvas.pump.push_canvas_images",
+        "schedule": float(os.getenv("AGENT_CANVAS_PUMP_SECONDS", "3.0")),
+    },
+}
 AGENT_MAX_TURN_BUDGET_USD = float(os.getenv("AGENT_MAX_TURN_BUDGET_USD", "10.00"))
 AGENT_SEMANTIC_TOKEN_BUDGET = int(os.getenv("AGENT_SEMANTIC_TOKEN_BUDGET", "10500"))
 AGENT_MMR_LAMBDA = float(os.getenv("AGENT_MMR_LAMBDA", "0.7"))

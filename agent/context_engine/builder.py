@@ -82,8 +82,12 @@ def build_context(
         threshold=0.9,
     )
 
-    # Assemble — different tasks pick different sections
-    sections: list[str] = [formatter.format_base_prompt(agent_name), ""]
+    # Assemble — different tasks pick different sections + system prompts
+    if task == "live_turn":
+        system_prompt = formatter.format_turn_system_prompt(agent_name)
+    else:
+        system_prompt = formatter.format_base_prompt(agent_name)
+    sections: list[str] = [system_prompt, ""]
 
     if task == "voice_briefing":
         # Compact prose — no sections, use a running paragraph

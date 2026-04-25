@@ -107,3 +107,4 @@ pgvector==0.3.6
 openai==1.59.9
 google-generativeai==0.8.4
 tiktoken==0.8.0
+Pillow==11.1.0

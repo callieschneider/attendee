@@ -13,6 +13,7 @@ from django.utils import timezone
 
 # Re-export Phase 5 background tasks so Celery's autodiscover finds them.
 from agent.turn_processor import process_meeting_turn  # noqa: F401
+from agent.canvas.pump import push_canvas_images  # noqa: F401
 
 log = logging.getLogger("agent.tasks")
 
