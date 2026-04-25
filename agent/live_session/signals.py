@@ -25,6 +25,11 @@ GATE_EXTEND_CHANNEL = "agent:live:gate_extend"
 SPEAK_CHANNEL = "agent:live:speak"
 VOICE_CONTEXT_CHANNEL = "agent:live:voice_ctx"
 
+# Redis key tracking gate state for cross-process coordination.
+# Set synchronously by the web process at gate-open time so the Turn Processor
+# can check it without waiting for DB replication from the bridge process.
+GATE_STATE_KEY_FMT = "agent:gate:{bot_id}"
+
 
 _REDIS_CLIENT = None
 
@@ -65,13 +70,81 @@ def _publish(channel: str, payload: dict) -> bool:
         return False
 
 
+def _set_gate_state(bot_id: str, reason: str, ttl_seconds: int) -> None:
+    """
+    Synchronously mark the gate open in Redis so the Turn Processor can
+    see it immediately (no DB roundtrip). TTL slightly longer than the
+    audio gate's auto-close so it doesn't expire first.
+    """
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.set(
+            GATE_STATE_KEY_FMT.format(bot_id=bot_id),
+            reason or "1",
+            ex=max(ttl_seconds + 5, 10),
+        )
+    except Exception:
+        log.exception("_set_gate_state: failed bot=%s", bot_id)
+
+
+def _extend_gate_state(bot_id: str, ttl_seconds: int) -> bool:
+    """Extend Redis gate key iff already set. Returns True if extended."""
+    r = _get_redis()
+    if r is None:
+        return False
+    try:
+        key = GATE_STATE_KEY_FMT.format(bot_id=bot_id)
+        existing = r.get(key)
+        if existing is None:
+            return False
+        r.set(key, existing, ex=max(ttl_seconds + 5, 10))
+        return True
+    except Exception:
+        log.exception("_extend_gate_state: failed bot=%s", bot_id)
+        return False
+
+
+def clear_gate_state(bot_id: str) -> None:
+    """Clear the Redis gate key. Called by the bridge on explicit close."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        r.delete(GATE_STATE_KEY_FMT.format(bot_id=bot_id))
+    except Exception:
+        log.exception("clear_gate_state: failed bot=%s", bot_id)
+
+
+def is_gate_open(bot_id: str) -> bool:
+    """Fast gate-state check used by the Turn Processor."""
+    r = _get_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.get(GATE_STATE_KEY_FMT.format(bot_id=bot_id)))
+    except Exception:
+        log.exception("is_gate_open: failed bot=%s", bot_id)
+        return False
+
+
 def publish_gate_open(bot_id: str, reason: str, ttl_seconds: int = 30) -> bool:
-    return _publish(GATE_CHANNEL, {"bot_id": bot_id, "reason": reason, "ttl_seconds": ttl_seconds})
+    _set_gate_state(bot_id, reason, ttl_seconds)
+    return _publish(
+        GATE_CHANNEL,
+        {"bot_id": bot_id, "reason": reason, "ttl_seconds": ttl_seconds},
+    )
 
 
 def publish_gate_extend(bot_id: str, ttl_seconds: int = 30) -> bool:
     """Extend the gate TTL iff already open. No-op if gate is closed."""
-    return _publish(GATE_EXTEND_CHANNEL, {"bot_id": bot_id, "ttl_seconds": ttl_seconds})
+    if not _extend_gate_state(bot_id, ttl_seconds):
+        return False
+    return _publish(
+        GATE_EXTEND_CHANNEL,
+        {"bot_id": bot_id, "ttl_seconds": ttl_seconds},
+    )
 
 
 def publish_speak(bot_id: str, text: str) -> bool:

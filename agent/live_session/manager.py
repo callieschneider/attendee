@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Optional
 
 import websockets
@@ -202,7 +203,14 @@ class LiveSessionManager:
         # Audio out (only flush to Attendee when gate open)
         server_content = msg.get("serverContent", {}) or {}
         if server_content.get("interrupted"):
-            log.info("live_session: Gemini interrupted bot=%s", self.bot_id)
+            log.info("live_session: Gemini interrupted bot=%s — dropping buffered audio", self.bot_id)
+            # Mark interrupted so we skip any modelTurn audio in THIS frame.
+            # (Gemini Live continues to send modelTurn frames briefly after
+            # emitting 'interrupted' while its TTS stream drains.)
+            self._interrupted_until = time.monotonic() + 0.5
+        if getattr(self, "_interrupted_until", 0) > time.monotonic():
+            # Skip any audio output during the drain window
+            server_content.pop("modelTurn", None)
         model_turn = server_content.get("modelTurn", {}) or {}
         for part in model_turn.get("parts", []) or []:
             inline = part.get("inlineData", {}) or {}

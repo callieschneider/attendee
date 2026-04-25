@@ -92,13 +92,11 @@ def create_meeting_bot(request):
     session_id = str(_uuid.uuid4())
     ws_url = f"wss://{bridge_domain}/audio/{session_id}"
 
-    # Canvas URL — this is what Attendee renders as the bot's video feed.
-    # We pass bot_id as session_id here because create_meeting_bot doesn't
-    # know the real bot_id yet; the canvas view looks up by metadata, so we
-    # point it at session_id and resolve server-side. Simpler path: use a
-    # `session/<session_id>` canvas route that does the resolution.
-    canvas_url = f"{agent_app_url}/agent/canvas/session/{session_id}"
-
+    # NOTE: voice_agent_settings was removed — Attendee's webpage streamer
+    # requires a k8s sidecar container that doesn't exist on Railway. The
+    # /agent/canvas/ endpoint still serves a live debug view you can open
+    # in your own browser. Bringing the bot's video feed online requires
+    # deploying a standalone webpage-streamer service; tracked separately.
     bot_payload = {
         "meeting_url": meeting_url,
         "bot_name": bot_name,
@@ -108,10 +106,6 @@ def create_meeting_bot(request):
                 "url": ws_url,
                 "sample_rate": 16000,
             }
-        },
-        "voice_agent_settings": {
-            "url": canvas_url,
-            "reserve_resources": True,
         },
         # Always set bridge_session_id so the bridge can look up the bot by its
         # session_id path segment. See agent/bridge.py::_resolve_bot_id.

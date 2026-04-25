@@ -118,7 +118,17 @@ def _process_turn(
     # Snapshot audio gate state — if open, Gemini Live is already conversing
     # with the user in real time. The Turn Processor should focus on silent
     # actions (tasks, artifacts, URLs) and NOT duplicate voice replies.
-    voice_conversation_active = bool(cursor.audio_gate_open)
+    # Prefer the Redis flag (set synchronously when gate opens) over the DB
+    # cursor field (persisted asynchronously by the bridge process).
+    voice_conversation_active = False
+    try:
+        from agent.live_session.signals import is_gate_open
+
+        voice_conversation_active = is_gate_open(bot_id)
+    except Exception:
+        log.exception("turn: gate-state check failed bot=%s", bot_id)
+    if not voice_conversation_active:
+        voice_conversation_active = bool(cursor.audio_gate_open)
 
     # ── Build context + call Flash ────────────────────────────────────────────
     ctx_result = build_context(bot_id=bot_id, task="live_turn")

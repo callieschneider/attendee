@@ -57,6 +57,14 @@ class AudioGate:
         self.is_open = False
         self._reason = ""
         await self._persist_state(open_state=False, reason=reason)
+        # Also clear the Redis gate key so the Turn Processor sees closed
+        # immediately (the DB write above is authoritative but slower).
+        try:
+            from .signals import clear_gate_state
+
+            clear_gate_state(self.bot_id)
+        except Exception:
+            log.exception("audio_gate: clear_gate_state failed bot=%s", self.bot_id)
         log.info("audio_gate: CLOSE bot=%s reason=%s", self.bot_id, reason)
 
     async def _auto_close(self, ttl_seconds: int) -> None:
