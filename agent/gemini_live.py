@@ -36,20 +36,39 @@ _LIVE_READ_ONLY_TOOL_NAMES = {
 }
 
 
+def _gather_tool_schemas_for_gemini_live() -> list[dict]:
+    """
+    Expose ALL tools to Gemini Live with BLOCKING behavior — same pattern
+    as abstrakt's working Gemini Live setup.
+    """
+    decls = []
+    for t in TOOL_REGISTRY.values():
+        d = to_gemini_declaration(t)
+        d["behavior"] = "BLOCKING"
+        decls.append(d)
+    return decls
+
+
 def build_live_setup(
     system_prompt: str,
     voice: str = "Kore",
     session_resumption_handle: str | None = None,
 ) -> dict:
     """
-    Build the Gemini Live setup message.
+    Build the Gemini Live setup message — ports abstrakt's working
+    configuration from src/lib/server/live-voice-setup.ts.
 
-    Gemini Live is a PURE VOICE RENDERER in this architecture.
-    - NO tools: Haiku (Turn Processor) handles all tool calls and decisions.
-    - NO transcriptions: we have Attendee's transcript; extra cost isn't worth it.
-    - Gemini Live just speaks whatever Haiku tells it to via realtimeInput.text.
+    Key features:
+    - thinkingConfig.thinkingLevel HIGH → Gemini Live's native reasoning
+    - contextWindowCompression slidingWindow → long-conversation memory
+    - All tools available with BLOCKING behavior
+    - Input + output transcriptions for observability
+    - Session resumption for the ~10-min cap
     """
     model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-09-2025")
+    thinking_level = getattr(settings, "AGENT_LIVE_THINKING_LEVEL", "HIGH").upper()
+
+    tool_declarations = _gather_tool_schemas_for_gemini_live()
 
     setup: dict = {
         "model": f"models/{model}",
@@ -58,15 +77,19 @@ def build_live_setup(
             "speechConfig": {
                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
             },
+            "thinkingConfig": {
+                "thinkingLevel": thinking_level,
+            },
         },
         "systemInstruction": {"parts": [{"text": system_prompt}]},
-        # No tools — all decisions go through Haiku Turn Processor.
-        "tools": [],
+        "tools": [{"functionDeclarations": tool_declarations}] if tool_declarations else [],
+        "sessionResumption": (
+            {"handle": session_resumption_handle} if session_resumption_handle else {}
+        ),
+        "contextWindowCompression": {"slidingWindow": {}},
+        "inputAudioTranscription": {},
+        "outputAudioTranscription": {},
     }
-
-    setup["sessionResumption"] = (
-        {"handle": session_resumption_handle} if session_resumption_handle else {}
-    )
 
     return {"setup": setup}
 

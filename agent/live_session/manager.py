@@ -57,12 +57,14 @@ _LIVE_READ_ONLY_TOOLS = {
     "web_search",
     "fetch_url",
     "read_recent_chat",
-    # Visual tools — write-mutating but idempotent, user-facing, and the
-    # canvas pump picks up changes on its next tick. Letting Gemini Live
-    # call these directly avoids the user hearing "I can't do that" when
-    # they ask for a chart on the bot's video.
+    # Visuals — Gemini Live can call these directly so you can ask for
+    # charts via voice. HTML specs render via Selenium and push immediately.
     "create_visual",
     "update_visual",
+    # Other write tools Gemini Live can call inline.
+    "create_task",
+    "send_chat_message",
+    "save_artifact_from_url",
 }
 
 

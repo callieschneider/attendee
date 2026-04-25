@@ -184,16 +184,19 @@ def _process_turn(
         if not _is_tool_allowed(tool_name, ctx_result.get("series")):
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
             continue
-        # Haiku is the brain — it always handles tool calls.
-        # Only routing rule: chat trigger → chat reply, voice trigger → voice reply.
+        # During voice conversations, Gemini Live handles speech.
+        # Haiku stays SILENT and only does background actions.
+        if voice_conversation_active and tool_name in ("speak_via_voice", "send_chat_message"):
+            log.info("turn: SUPPRESS %s — voice conversation active bot=%s", tool_name, bot_id)
+            continue
+        # Channel routing for non-voice triggers
         if trigger_kind == "chat" and tool_name == "speak_via_voice":
             tool_name = "send_chat_message"
             tool_input = {"text": tool_input.get("text", ""), "to": "everyone"}
             log.info("turn: rerouted speak_via_voice → send_chat_message (chat trigger) bot=%s", bot_id)
         elif trigger_kind == "voice" and tool_name == "send_chat_message":
-            tool_name = "speak_via_voice"
-            tool_input = {"text": tool_input.get("text", "")}
-            log.info("turn: rerouted send_chat_message → speak_via_voice (voice trigger) bot=%s", bot_id)
+            log.info("turn: SUPPRESS send_chat_message (voice trigger) bot=%s", bot_id)
+            continue
 
         entry = ActionLogEntry.objects.create(
             bot_id=bot_id,
