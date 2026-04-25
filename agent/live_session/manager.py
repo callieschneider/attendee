@@ -298,6 +298,13 @@ class LiveSessionManager:
             try:
                 result = await _exec()
                 latency_ms = int((_time.time() - t0) * 1000)
+                # Match abstrakt's tool response shape: must be a dict.
+                # Wrap non-dicts in {"output": ...}.
+                if isinstance(result, dict):
+                    response_obj = result
+                else:
+                    response_obj = {"output": result}
+
                 if isinstance(result, dict) and result.get("error"):
                     await self._log_action(
                         name, args,
@@ -309,11 +316,11 @@ class LiveSessionManager:
                 else:
                     await self._log_action(
                         name, args,
-                        result=result if isinstance(result, dict) else {"value": str(result)},
+                        result=response_obj,
                         status="ok",
                         latency_ms=latency_ms,
                     )
-                responses.append({"id": call_id, "name": name, "response": result})
+                responses.append({"id": call_id, "name": name, "response": response_obj})
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"
                 latency_ms = int((_time.time() - t0) * 1000)
