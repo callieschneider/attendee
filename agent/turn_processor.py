@@ -102,8 +102,9 @@ def _process_turn(
         ):
             return {"skipped": "cursor advanced"}
 
-        # Pull the chunk (inclusive > cursor)
-        qs = TranscriptEvent.objects.filter(bot_id=bot_id)
+        # Pull the chunk (inclusive > cursor) — exclude self-utterances so we
+        # don't feed the bot's own voice back into the LLM as user input.
+        qs = TranscriptEvent.objects.filter(bot_id=bot_id).exclude(raw__self_utterance=True)
         if cursor.cursor_event_time:
             qs = qs.filter(event_time__gt=cursor.cursor_event_time)
         chunk = list(qs.order_by("event_time", "created_at")[:MAX_CHUNK_SIZE])

@@ -298,14 +298,49 @@ class LiveSessionManager:
                         },
                     }
                 )
+                # Log the rejection so it shows in the canvas debug UI
+                await self._log_action(
+                    name, args,
+                    result={},
+                    status="error",
+                    error_msg=f"rejected: {name} is write-mutating",
+                )
                 continue
 
             @sync_to_async
             def _exec(n=name, a=args):
                 return execute_tool(n, a, {"bot_id": self.bot_id})
 
-            result = await _exec()
-            responses.append({"id": call_id, "name": name, "response": result})
+            import time as _time
+            t0 = _time.time()
+            try:
+                result = await _exec()
+                latency_ms = int((_time.time() - t0) * 1000)
+                if isinstance(result, dict) and result.get("error"):
+                    await self._log_action(
+                        name, args,
+                        result=result,
+                        status="error",
+                        error_msg=str(result.get("error"))[:300],
+                        latency_ms=latency_ms,
+                    )
+                else:
+                    await self._log_action(
+                        name, args,
+                        result=result if isinstance(result, dict) else {"value": str(result)},
+                        status="ok",
+                        latency_ms=latency_ms,
+                    )
+                responses.append({"id": call_id, "name": name, "response": result})
+            except Exception as exc:
+                err = f"{type(exc).__name__}: {exc}"
+                latency_ms = int((_time.time() - t0) * 1000)
+                log.exception("live_session: tool %s raised bot=%s", name, self.bot_id)
+                await self._log_action(
+                    name, args, result={}, status="error",
+                    error_msg=err[:300], latency_ms=latency_ms,
+                )
+                responses.append({"id": call_id, "name": name, "response": {"error": err}})
 
         try:
             async with self._send_lock:
@@ -314,6 +349,42 @@ class LiveSessionManager:
                 )
         except Exception:
             log.exception("live_session: tool response send failed bot=%s", self.bot_id)
+
+    async def _log_action(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        result: dict,
+        status: str,
+        error_msg: str = "",
+        latency_ms: int | None = None,
+    ) -> None:
+        """Persist an ActionLogEntry for a Gemini Live tool call so it shows in
+        the canvas debug UI alongside Turn Processor actions."""
+        import uuid as _uuid
+
+        @sync_to_async
+        def _save():
+            try:
+                from agent.models import ActionLogEntry
+
+                ActionLogEntry.objects.create(
+                    bot_id=self.bot_id,
+                    turn_id=_uuid.uuid4(),
+                    tool_name=tool_name,
+                    tool_input=tool_input or {},
+                    tool_result=result or {},
+                    status=status,
+                    error_message=error_msg or "",
+                    latency_ms=latency_ms,
+                )
+            except Exception:
+                log.exception("_log_action: persist failed bot=%s tool=%s", self.bot_id, tool_name)
+
+        try:
+            await _save()
+        except Exception:
+            log.exception("_log_action: wrapper failed")
 
     async def _attendee_audio_pump(self) -> None:
         """Forward Attendee audio into Gemini Live iff gate is open."""

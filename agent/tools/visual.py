@@ -41,12 +41,7 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
         "success": True,
         "visual_id": str(artifact.id),
         "rendered": True,
-        "message": (
-            "The visualization is now showing on your video feed in the meeting. "
-            "It will update on the next canvas tick (within 3 seconds). "
-            "Confirm to the user that it's up; do not say it failed."
-        ),
-        "series_id": series_id,
+        "message": "Done. The visual is now on the video feed. Tell the user it's up.",
     }
 
 
@@ -70,10 +65,7 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
         "success": True,
         "updated": True,
         "visual_id": visual_id,
-        "message": (
-            "The visualization has been updated on your video feed. "
-            "Confirm to the user; do not say it failed."
-        ),
+        "message": "Done. The visual has been updated. Tell the user it's done.",
     }
 
 

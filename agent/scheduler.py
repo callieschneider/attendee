@@ -120,8 +120,10 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
     ):
         return "deferred_recent"
 
-    # Find new events since cursor
-    qs = TranscriptEvent.objects.filter(bot_id=bot_id)
+    # Find new events since cursor — exclude self-utterances (the bot's own audio
+    # echoed back via Attendee's transcripts; they're stored for the canvas UI
+    # but should never trigger a turn or get fed back into the LLM).
+    qs = TranscriptEvent.objects.filter(bot_id=bot_id).exclude(raw__self_utterance=True)
     if cursor.cursor_event_time:
         qs = qs.filter(event_time__gt=cursor.cursor_event_time)
     latest = qs.order_by("-event_time", "-created_at").first()

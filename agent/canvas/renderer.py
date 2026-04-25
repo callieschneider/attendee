@@ -150,16 +150,18 @@ def _draw_feed(draw, state, L, R, y_top, y_bottom, font_body, font_mono):
             "text": (e.get("text") or "")[:160],
         })
     for a in state.get("actions") or []:
-        msg = a.get("tool", "?")
         if a.get("status") == "error":
-            msg += " — " + (a.get("error") or "")[:60]
+            err = (a.get("error") or "").replace("\n", " ")
+            text = f"FAILED: {err[:140]}"
         elif a.get("latency_ms"):
-            msg += f" ({a['latency_ms']}ms)"
+            text = f"OK ({a['latency_ms']}ms)"
+        else:
+            text = "OK"
         rows.append({
             "ts": a.get("t"),
             "kind": "action " + (a.get("status") or ""),
             "who": a.get("tool", "?")[:28],
-            "text": msg,
+            "text": text,
         })
     rows.sort(key=lambda r: r.get("ts") or "")
 

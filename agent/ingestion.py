@@ -153,16 +153,9 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     timestamp_ms = data.get("timestamp_ms", 0)
     event_time = _timestamp_ms_to_dt(timestamp_ms)
 
-    # Filter out the bot's own audio — Attendee transcribes EVERYTHING in the
-    # meeting including the bot's own TTS output. Without this filter, the
-    # bot hears itself say its name and re-triggers, causing apparent
-    # "answering twice in the same turn" symptom.
-    if _is_self_speech(bot_id, speaker):
-        log.debug(
-            "ingestion: dropped self-utterance bot=%s speaker=%s text=%r",
-            bot_id, speaker, text[:60],
-        )
-        return {"ignored": "self_utterance", "speaker": speaker}
+    # Tag self-utterances so the scheduler/classifier can ignore them, but
+    # keep them in the DB so they show in the canvas debug UI.
+    is_self = _is_self_speech(bot_id, speaker)
 
     # Synthesize a stable dedup key: speaker_uuid + start ms works because
     # Attendee fires exactly one webhook per finalized utterance.
@@ -252,29 +245,47 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
     ensure_cursor(bot_id)
     occurrence = _find_occurrence_for_bot(bot_id)
 
+    raw_with_tag = dict(data) if isinstance(data, dict) else {"raw": data}
+    if is_self:
+        raw_with_tag["self_utterance"] = True
+
     try:
         with transaction.atomic():
             event, created = TranscriptEvent.objects.update_or_create(
                 bot_id=bot_id,
                 utterance_ref=utterance_ref,
                 defaults={
-                    "kind": "chat",
+                    "kind": "speech",
                     "event_time": event_time,
                     "speaker": speaker,
                     "speaker_uuid": speaker_uuid,
                     "text": text,
-                    "raw": data,
+                    "raw": raw_with_tag,
                     "occurrence": occurrence,
                 },
             )
     except Exception:
-        log.exception("ingest_chat_message: failed bot=%s ref=%s", bot_id, utterance_ref)
+        log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
-    # Chat mentions never open the audio gate — chat replies go back through chat.
-    _schedule_turn_safely(bot_id, priority="chat")
+    # Skip classifier + scheduler entirely for self-utterances — but the
+    # event itself stays in DB so it appears in the canvas debug UI.
+    if is_self:
+        return {
+            "kind": "speech",
+            "event_id": str(event.id),
+            "created": created,
+            "self_utterance": True,
+        }
+
+    # Direct-address detection → open the audio gate (best-effort)
+    _maybe_open_gate_on_address(bot_id, text)
+
+    # Fire-and-forget schedule — never blocks the webhook
+    _schedule_turn_safely(bot_id)
+
     return {
-        "kind": "chat",
+        "kind": "speech",
         "event_id": str(event.id),
         "created": created,
     }
