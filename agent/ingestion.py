@@ -153,6 +153,17 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     timestamp_ms = data.get("timestamp_ms", 0)
     event_time = _timestamp_ms_to_dt(timestamp_ms)
 
+    # Filter out the bot's own audio — Attendee transcribes EVERYTHING in the
+    # meeting including the bot's own TTS output. Without this filter, the
+    # bot hears itself say its name and re-triggers, causing apparent
+    # "answering twice in the same turn" symptom.
+    if _is_self_speech(bot_id, speaker):
+        log.debug(
+            "ingestion: dropped self-utterance bot=%s speaker=%s text=%r",
+            bot_id, speaker, text[:60],
+        )
+        return {"ignored": "self_utterance", "speaker": speaker}
+
     # Synthesize a stable dedup key: speaker_uuid + start ms works because
     # Attendee fires exactly one webhook per finalized utterance.
     utterance_ref = f"{speaker_uuid or 'anon'}:{timestamp_ms}"
@@ -270,6 +281,42 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
 
 
 # ── Turn Scheduler hook ────────────────────────────────────────────────────────
+
+
+def _is_self_speech(bot_id: str, speaker_name: str) -> bool:
+    """
+    Return True if the speaker is the bot itself.
+
+    The bot's display name in Meet comes from the Google Workspace profile
+    when the bot is signed in via SSO, NOT from `bot_name` we pass at create
+    time. Common defaults: "Meeting Agent". We also include any per-bot
+    configured names as a belt-and-suspenders check.
+    """
+    if not speaker_name:
+        return False
+    name_lower = speaker_name.strip().lower()
+    if not name_lower:
+        return False
+
+    self_names = {"meeting agent"}  # Workspace seat default
+    try:
+        from django.conf import settings
+
+        agent_name = (getattr(settings, "AGENT_NAME", "") or "").strip().lower()
+        if agent_name:
+            self_names.add(agent_name)
+    except Exception:
+        pass
+    try:
+        from bots.models import Bot
+
+        bot = Bot.objects.filter(object_id=bot_id).only("name").first()
+        if bot and bot.name:
+            self_names.add(bot.name.strip().lower())
+    except Exception:
+        pass
+
+    return name_lower in self_names
 
 
 def _maybe_open_gate_on_address(bot_id: str, text: str) -> None:

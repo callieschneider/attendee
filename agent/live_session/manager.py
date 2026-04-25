@@ -75,6 +75,12 @@ class LiveSessionManager:
         self._resumption_handle: Optional[str] = None
         self._stop_event = asyncio.Event()
         self._send_lock = asyncio.Lock()
+        # Echo suppression: while the bot is actively emitting TTS, drop
+        # incoming meeting audio. Without this, the bot hears its own voice,
+        # Gemini's VAD trips, the response restarts mid-sentence, and the
+        # transcript shows "twice in the same turn" duplication.
+        self._bot_speaking_until: float = 0.0
+        self._interrupted_until: float = 0.0
 
     # ── Public entrypoint ────────────────────────────────────────────────────
 
@@ -211,11 +217,14 @@ class LiveSessionManager:
         server_content = msg.get("serverContent", {}) or {}
         if server_content.get("interrupted"):
             log.info("live_session: Gemini interrupted bot=%s — dropping buffered audio", self.bot_id)
-            # Mark interrupted so we skip any modelTurn audio in THIS frame.
-            # (Gemini Live continues to send modelTurn frames briefly after
-            # emitting 'interrupted' while its TTS stream drains.)
+            # Mark interrupted so we skip any modelTurn audio in THIS frame
+            # and the next ~500ms window (Gemini Live continues to send
+            # modelTurn frames briefly after emitting 'interrupted' while
+            # its TTS stream drains).
             self._interrupted_until = time.monotonic() + 0.5
-        if getattr(self, "_interrupted_until", 0) > time.monotonic():
+            # Also reset the bot-speaking flag so user can speak immediately.
+            self._bot_speaking_until = 0.0
+        if self._interrupted_until > time.monotonic():
             # Skip any audio output during the drain window
             server_content.pop("modelTurn", None)
         model_turn = server_content.get("modelTurn", {}) or {}
@@ -229,6 +238,10 @@ class LiveSessionManager:
                     # log once at INFO and drop the chunk.
                     log.debug("live_session: audio while gate closed bot=%s (dropped)", self.bot_id)
                     continue
+                # Mark "bot is currently speaking" — used by the audio pump to
+                # drop incoming mic audio for the duration of bot speech +
+                # a small echo-tail window. Each audio frame extends this.
+                self._bot_speaking_until = time.monotonic() + 0.6
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:
@@ -255,6 +268,8 @@ class LiveSessionManager:
                 "live_session: turnComplete bot=%s — leaving gate open for reply",
                 self.bot_id,
             )
+            # Bot is done speaking; user can speak immediately now.
+            self._bot_speaking_until = 0.0
 
         # Tool calls — only read-only fast-path; writes go through Turn Processor
         tc = msg.get("toolCall")
@@ -316,6 +331,12 @@ class LiveSessionManager:
 
                 if not self.gate.is_open:
                     # Drop silently — Gemini gets no audio unless gate is open
+                    continue
+                # Echo suppression: the bot's own TTS comes back through the
+                # meeting's mixed audio. Don't forward it back to Gemini Live
+                # while it's speaking + a short tail (otherwise Gemini's VAD
+                # trips on the echo and restarts the response mid-sentence).
+                if time.monotonic() < self._bot_speaking_until:
                     continue
 
                 data = msg.get("data", {})
