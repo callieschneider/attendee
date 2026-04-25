@@ -36,13 +36,21 @@ _LIVE_READ_ONLY_TOOL_NAMES = {
 }
 
 
+# Tools NOT exposed to Gemini Live. speak_via_voice would create a recursive
+# loop (Gemini Live calling a tool that asks itself to speak). Gemini Live
+# speaks directly via its native audio output.
+_HIDDEN_FROM_LIVE = {"speak_via_voice"}
+
+
 def _gather_tool_schemas_for_gemini_live() -> list[dict]:
     """
-    Expose ALL tools to Gemini Live with BLOCKING behavior — same pattern
+    Expose tools to Gemini Live with BLOCKING behavior — same pattern
     as abstrakt's working Gemini Live setup.
     """
     decls = []
     for t in TOOL_REGISTRY.values():
+        if t.name in _HIDDEN_FROM_LIVE:
+            continue
         d = to_gemini_declaration(t)
         d["behavior"] = "BLOCKING"
         decls.append(d)
