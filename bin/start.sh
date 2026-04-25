@@ -15,7 +15,8 @@ case "$ROLE" in
   worker)
     # -B runs celery beat inside the same process (no separate service needed).
     # Agent beat schedule: canvas image pump (see production_with_agent.py).
-    exec celery -A attendee worker -B -l info
+    # Use /tmp for the schedule db since the working dir isn't writable.
+    exec celery -A attendee worker -B -l info -s /tmp/celerybeat-schedule
     ;;
   bridge)
     exec python -m agent.bridge
