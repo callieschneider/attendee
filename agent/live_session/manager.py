@@ -199,6 +199,26 @@ class LiveSessionManager:
 
         # Audio out (only flush to Attendee when gate open)
         server_content = msg.get("serverContent", {}) or {}
+
+        # Gemini Live inline transcripts — instant, used for canvas display
+        in_tr = server_content.get("inputTranscription") or {}
+        if in_tr.get("text"):
+            await self._log_transcript(
+                kind="speech",
+                speaker="User",
+                text=in_tr["text"],
+                finished=bool(in_tr.get("finished")),
+                buf_key="_in_tr_buf",
+            )
+        out_tr = server_content.get("outputTranscription") or {}
+        if out_tr.get("text"):
+            await self._log_transcript(
+                kind="speech",
+                speaker="Clever Star",
+                text=out_tr["text"],
+                finished=bool(out_tr.get("finished")),
+                buf_key="_out_tr_buf",
+            )
         if server_content.get("interrupted"):
             log.info("live_session: Gemini interrupted bot=%s — dropping buffered audio", self.bot_id)
             # Mark interrupted so we skip any modelTurn audio in THIS frame
@@ -330,6 +350,83 @@ class LiveSessionManager:
                 )
         except Exception:
             log.exception("live_session: tool response send failed bot=%s", self.bot_id)
+        # After tool calls finish, push a fresh canvas immediately so the
+        # action log + any new visual show up without waiting for next tick.
+        self._push_canvas_now()
+
+    def _push_canvas_now(self) -> None:
+        """Best-effort fire-and-forget canvas refresh after a state change."""
+        try:
+            from agent.canvas.pump import push_canvas_images_for_bot
+
+            asyncio.create_task(self._push_canvas_async(push_canvas_images_for_bot))
+        except Exception:
+            pass
+
+    async def _push_canvas_async(self, fn) -> None:
+        try:
+            await sync_to_async(fn)(self.bot_id)
+        except Exception:
+            log.exception("_push_canvas_async: failed bot=%s", self.bot_id)
+
+    async def _log_transcript(
+        self,
+        kind: str,
+        speaker: str,
+        text: str,
+        finished: bool,
+        buf_key: str,
+    ) -> None:
+        """
+        Gemini Live emits transcript fragments via inputTranscription /
+        outputTranscription. Accumulate fragments and persist a single
+        TranscriptEvent per finalized utterance.
+        """
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+
+        # Lazy-init per-key buffers on the instance
+        buf = getattr(self, buf_key, None)
+        if buf is None:
+            buf = {"text": "", "started_at": None}
+            setattr(self, buf_key, buf)
+
+        if not buf["started_at"]:
+            buf["started_at"] = _dt.now(_tz.utc)
+        buf["text"] += text
+
+        # Always update DB with running text so canvas shows progress live
+        @sync_to_async
+        def _persist():
+            try:
+                from agent.models import TranscriptEvent
+
+                ref = f"live:{kind}:{speaker}:{buf['started_at'].timestamp()}"
+                TranscriptEvent.objects.update_or_create(
+                    bot_id=self.bot_id,
+                    utterance_ref=ref,
+                    defaults={
+                        "kind": kind,
+                        "event_time": buf["started_at"],
+                        "speaker": speaker,
+                        "text": buf["text"],
+                        "raw": {"finished": finished, "source": "gemini_live"},
+                    },
+                )
+            except Exception:
+                log.exception("_log_transcript: persist failed bot=%s", self.bot_id)
+
+        try:
+            await _persist()
+        except Exception:
+            log.exception("_log_transcript: wrapper failed")
+
+        if finished:
+            # Reset buffer so next utterance starts fresh
+            setattr(self, buf_key, {"text": "", "started_at": None})
+            # Push a fresh canvas frame immediately so the transcript appears
+            # without waiting for the next 1s pump tick.
+            self._push_canvas_now()
 
     async def _log_action_create(
         self,

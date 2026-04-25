@@ -108,39 +108,23 @@ def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
 
 
 def _draw_debug_pane(draw, state, font_title, font_h2, font_body, font_small, font_mono, font_mono_small):
+    """Clean conversation-focused left pane."""
     L = 24
     R = _WIDTH // 2 - 24
     y = 28
 
     # Header
     draw.text((L, y), "Clever Star", fill=FG, font=font_title)
-    gate = (state.get("cursor") or {}).get("audio_gate_open", False)
-    gate_reason = (state.get("cursor") or {}).get("audio_gate_reason", "")
-    gate_label = f"gate: OPEN ({gate_reason})" if gate else "gate: closed"
-    gate_color = OK if gate else MUTED
-    draw.text((R - _text_w(draw, gate_label, font_small), y + 6), gate_label, fill=gate_color, font=font_small)
-
-    y += 42
-
-    # Thinking pill
     if state.get("thinking"):
-        draw.ellipse((L, y + 2, L + 10, y + 12), fill=WARN)
-        draw.text((L + 18, y), "processing…", fill=WARN, font=font_small)
-        y += 20
+        # Pulsing dot indicates an in-flight action
+        dot_x = R - 18
+        draw.ellipse((dot_x, y + 12, dot_x + 12, y + 24), fill=WARN)
+        draw.text((dot_x - 80, y + 12), "thinking…", fill=WARN, font=font_small)
 
-    # Stats grid (4 cells)
-    y = _draw_stats(draw, state, L, R, y, font_small, font_mono_small)
+    y += 50
 
-    # Feed section
-    draw.text((L, y), "TRANSCRIPT + ACTIONS", fill=MUTED, font=font_h2)
-    y += 22
-
-    _draw_feed(draw, state, L, R, y, _HEIGHT - 40, font_body, font_mono_small)
-
-    # Footer
-    now_label = timezone.now().strftime("%H:%M:%S")
-    draw.text((L, _HEIGHT - 22), f"bot: {state.get('bot_id','')}", fill=MUTED, font=font_small)
-    draw.text((R - _text_w(draw, now_label, font_small), _HEIGHT - 22), now_label, fill=MUTED, font=font_small)
+    # Conversation feed (transcripts + tool actions interleaved)
+    _draw_feed(draw, state, L, R, y, _HEIGHT - 30, font_body, font_mono_small)
 
 
 def _draw_stats(draw, state, L, R, y, font_small, font_mono):
@@ -161,56 +145,98 @@ def _draw_stats(draw, state, L, R, y, font_small, font_mono):
 
 
 def _draw_feed(draw, state, L, R, y_top, y_bottom, font_body, font_mono):
-    # Merge events + actions, sort, take the tail
+    """
+    Conversation-style feed. Speaker turns are full-width with the speaker
+    label on its own line. Tool actions are compact one-liners.
+    """
     rows = []
     for e in state.get("events") or []:
         rows.append({
             "ts": e.get("t"),
+            "type": "turn",
             "kind": e.get("kind", "speech"),
-            "who": (e.get("speaker") or "?")[:28],
-            "text": (e.get("text") or "")[:160],
+            "who": (e.get("speaker") or "?")[:32],
+            "text": (e.get("text") or "")[:400],
         })
     for a in state.get("actions") or []:
         status = a.get("status", "")
         if status == "error":
             err = (a.get("error") or "").replace("\n", " ")
-            text = f"FAILED: {err[:140]}"
+            label = f"⚠ {a.get('tool','?')} failed: {err[:80]}"
+            color = ERR
         elif status == "pending":
-            text = "RUNNING…"
-        elif a.get("latency_ms"):
-            text = f"OK ({a['latency_ms']}ms)"
+            label = f"⏳ {a.get('tool','?')} running…"
+            color = WARN
         else:
-            text = "OK"
+            label = f"✓ {a.get('tool','?')}"
+            color = OK
         rows.append({
             "ts": a.get("t"),
-            "kind": "action " + status,
-            "who": a.get("tool", "?")[:28],
-            "text": text,
+            "type": "action",
+            "label": label,
+            "color": color,
         })
     rows.sort(key=lambda r: r.get("ts") or "")
 
-    # Fit rows that actually fit in the visible area (leave bottom 36px for footer)
-    line_h = 22
-    max_rows = max(1, (y_bottom - y_top) // line_h)
-    rows = rows[-max_rows:]
+    # Prefer to fit recent items first, walk back from y_top until height runs out
+    avail_w = R - L
+    line_h_text = 18
+    line_h_action = 18
+    speaker_h = 16
+    turn_gap = 6
+
+    # Render bottom-up: take rows from the end, compute heights, stop when full
+    rendered = []
+    height_used = 0
+    for row in reversed(rows):
+        if row["type"] == "action":
+            h = line_h_action + 4
+        else:
+            wrapped = _wrap_text(draw, row["text"], font_body, avail_w - 12)
+            h = speaker_h + line_h_text * len(wrapped) + turn_gap
+        if height_used + h > (y_bottom - y_top):
+            break
+        rendered.insert(0, (row, h, wrapped if row["type"] == "turn" else None))
+        height_used += h
 
     y = y_top
-    for row in rows:
-        ts = _short_time(row["ts"]) or "--:--:--"
-        kind = row["kind"]
-        color = SPEAKER
-        if "chat" in kind:
-            color = SPEAKER_CHAT
-        elif "action" in kind:
-            color = OK if "ok" in kind else ERR if "error" in kind else SPEAKER_ACTION
-        draw.text((L, y), ts, fill=MUTED, font=font_mono)
-        draw.text((L + 60, y), row["who"], fill=color, font=font_body)
-        text_x = L + 60 + _text_w(draw, row["who"], font_body) + 8
-        text = row["text"]
-        avail = R - text_x
-        text = _truncate_to_width(draw, text, font_body, avail)
-        draw.text((text_x, y), text, fill=FG, font=font_body)
-        y += line_h
+    for row, h, wrapped in rendered:
+        if row["type"] == "action":
+            ts = _short_time(row["ts"]) or "--:--"
+            draw.text((L, y), ts, fill=MUTED, font=font_mono)
+            draw.text((L + 50, y), row["label"], fill=row["color"], font=font_body)
+            y += h
+        else:
+            ts = _short_time(row["ts"]) or "--:--"
+            who = row["who"]
+            kind = row["kind"]
+            who_color = SPEAKER if kind != "chat" else SPEAKER_CHAT
+            draw.text((L, y), ts, fill=MUTED, font=font_mono)
+            draw.text((L + 50, y), who, fill=who_color, font=font_body)
+            y += speaker_h
+            for line in wrapped or []:
+                draw.text((L + 50, y), line, fill=FG, font=font_body)
+                y += line_h_text
+            y += turn_gap
+
+
+def _wrap_text(draw, text, font, max_w):
+    """Greedy word wrap. Returns list of lines."""
+    words = text.split()
+    lines = []
+    line = ""
+    for w in words:
+        candidate = (line + " " + w).strip() if line else w
+        if _text_w(draw, candidate, font) <= max_w:
+            line = candidate
+        else:
+            if line:
+                lines.append(line)
+            line = w
+    if line:
+        lines.append(line)
+    # Cap at 8 lines per turn to keep things scrollable
+    return lines[:8]
 
 
 def _draw_viz_pane(draw, state, font_title, font_h2, font_body, font_mono_small):

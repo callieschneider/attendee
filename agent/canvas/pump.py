@@ -82,6 +82,19 @@ def _live_bot_ids() -> list[str]:
     )
 
 
+def push_canvas_images_for_bot(bot_id: str) -> dict:
+    """Synchronously render + push for a single bot. Used for event-driven
+    refreshes when state changes (new transcript, tool finish, etc.)."""
+    from django.conf import settings
+
+    api_key = getattr(settings, "ATTENDEE_API_KEY", "")
+    api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
+    if not api_key or not api_base:
+        return {"error": "missing config"}
+    sent, _ = _push_one(bot_id, api_base, api_key)
+    return {"pushed": int(sent)}
+
+
 def _push_one(bot_id: str, api_base: str, api_key: str) -> tuple[bool, bool]:
     """Render + POST a canvas image for one bot. Returns (sent, skipped_same)."""
     from .renderer import render_canvas_png

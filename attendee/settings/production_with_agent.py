@@ -37,10 +37,13 @@ AGENT_PAUSE_THRESHOLD_SECONDS = float(os.getenv("AGENT_PAUSE_THRESHOLD_SECONDS",
 AGENT_PAUSE_MIN_CONTENT_SECONDS = float(os.getenv("AGENT_PAUSE_MIN_CONTENT_SECONDS", "6.0"))
 
 # Celery Beat schedule — runs inside the worker process (celery -B flag).
+# Canvas pump now ticks every 1s for faster visual updates. Combined with
+# event-driven push from create_visual itself, the user sees changes
+# almost immediately.
 CELERY_BEAT_SCHEDULE = {
     "agent-canvas-pump": {
         "task": "agent.canvas.pump.push_canvas_images",
-        "schedule": float(os.getenv("AGENT_CANVAS_PUMP_SECONDS", "3.0")),
+        "schedule": float(os.getenv("AGENT_CANVAS_PUMP_SECONDS", "1.0")),
     },
 }
 AGENT_MAX_TURN_BUDGET_USD = float(os.getenv("AGENT_MAX_TURN_BUDGET_USD", "10.00"))

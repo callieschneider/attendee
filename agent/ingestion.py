@@ -277,12 +277,11 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
             "self_utterance": True,
         }
 
-    # Direct-address → open gate AND fire high-priority turn immediately.
-    # Haiku needs to get the request ASAP to decide what to say and speak.
-    if _maybe_open_gate_on_address(bot_id, text):
-        _schedule_turn_safely(bot_id, priority="voice_direct")
-    else:
-        _schedule_turn_safely(bot_id)
+    # NOTE: Turn Processor / scheduler is intentionally NOT triggered here.
+    # Gemini Live is the conversational primary and handles all tool calls
+    # itself (with `call_model` to escalate to Haiku when needed).
+    # Running a parallel Haiku loop on every transcript event added noise
+    # and cost without value.
 
     return {
         "kind": "speech",
