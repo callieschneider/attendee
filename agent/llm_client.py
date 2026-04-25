@@ -33,10 +33,12 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 _COST_PER_1K_INPUT = {
     "google/gemini-2.5-flash": Decimal("0.00031"),
     "google/gemini-2.5-flash-lite": Decimal("0.00015"),
+    "anthropic/claude-haiku-4.5": Decimal("0.001"),  # $1.00 / 1M input
 }
 _COST_PER_1K_OUTPUT = {
     "google/gemini-2.5-flash": Decimal("0.00262"),
     "google/gemini-2.5-flash-lite": Decimal("0.0006"),
+    "anthropic/claude-haiku-4.5": Decimal("0.005"),  # $5.00 / 1M output
 }
 
 

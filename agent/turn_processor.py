@@ -182,17 +182,16 @@ def _process_turn(
         if not _is_tool_allowed(tool_name, ctx_result.get("series")):
             log.info("turn: tool %s blocked by series policy bot=%s", tool_name, bot_id)
             continue
-        # If a voice conversation is already in progress, Gemini Live is
-        # handling spoken replies — the Turn Processor must NOT also speak
-        # OR send chat messages (that would be a double-reply).
+        # Voice conversations: Turn Processor is silent. Gemini Live handles
+        # the spoken back-and-forth in real time. Turn Processor only does
+        # silent side actions (tasks, artifacts, etc).
         if voice_conversation_active and tool_name in ("speak_via_voice", "send_chat_message"):
             log.info(
                 "turn: SUPPRESS %s — voice conversation active bot=%s",
                 tool_name, bot_id,
             )
             continue
-        # Hard routing: chat trigger → chat reply (if any); voice trigger
-        # should never use the Turn Processor for spoken output.
+        # Channel routing for non-voice triggers.
         if trigger_kind == "chat" and tool_name == "speak_via_voice":
             log.info(
                 "turn: rewriting speak_via_voice → send_chat_message (chat trigger) bot=%s",
@@ -201,9 +200,8 @@ def _process_turn(
             tool_name = "send_chat_message"
             tool_input = {"text": tool_input.get("text", ""), "to": "everyone"}
         elif trigger_kind == "voice" and tool_name == "send_chat_message":
-            # Voice trigger should NOT produce chat — Gemini Live replies by voice.
             log.info(
-                "turn: SUPPRESS send_chat_message (voice trigger, Gemini Live handles reply) bot=%s",
+                "turn: SUPPRESS send_chat_message (voice trigger, Gemini Live handles) bot=%s",
                 bot_id,
             )
             continue
@@ -475,22 +473,28 @@ def _render_user_prompt(
         )
     elif voice_conversation_active:
         lines.append(
-            "## Voice conversation is live — do NOT speak"
-            "\nGemini Live is handling the spoken conversation right now. "
-            "Your ONLY job this turn is silent actions: capture tasks, "
-            "save artifacts, save URLs, create/update visualizations on the "
-            "bot's canvas, or queue emails. You MUST NOT call `speak_via_voice` "
-            "or `send_chat_message`. If nothing in the chunk warrants a silent "
-            "action, reply with exactly 'noop'."
+            "## Background actions only — voice conversation is live\n"
+            "Gemini Live is currently having a conversation with the user via "
+            "voice. Your job is to handle SILENT background tasks the voice "
+            "model is too small to do well: capturing tasks, saving URLs, "
+            "creating non-trivial visualizations.\n\n"
+            "**Tools you should use:**\n"
+            "- `create_task` — when the user clearly states an action item.\n"
+            "- `save_artifact_from_url` — when a URL is shared and worth saving.\n"
+            "- `create_artifact` — when the user says 'save this' or similar.\n"
+            "- `create_visual` — ONLY for complex visualizations the voice "
+            "  model would struggle with (large data sets, complex tables).\n\n"
+            "**Tools you must NOT use:**\n"
+            "- `speak_via_voice` — Gemini Live handles spoken replies.\n"
+            "- `send_chat_message` — only if the user was addressing you in chat.\n\n"
+            "If the chunk has nothing actionable, reply with exactly 'noop'."
         )
     else:
         lines.append(
-            "## Consider the chunk"
-            "\nScan for actionable items: tasks, decisions, shared URLs. "
-            "If nothing clearly stands out, reply 'noop' and take no action. "
-            "Do NOT call `speak_via_voice` unless there's a specific reason "
-            "to interject (e.g., flagging privacy risk) — normal replies "
-            "happen via Gemini Live's voice path, not through you."
+            "## Background actions\n"
+            "Look for actionable items in the chunk: clear tasks, shared URLs, "
+            "decisions worth saving. If nothing stands out, reply 'noop'.\n"
+            "Do NOT call `speak_via_voice` — Gemini Live handles voice replies."
         )
 
     lines.append("")

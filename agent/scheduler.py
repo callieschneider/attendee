@@ -27,7 +27,9 @@ from django.utils import timezone
 log = logging.getLogger("agent.scheduler")
 
 # Minimum seconds between turn invocations for the same bot.
-TURN_DEBOUNCE_SECONDS = 6.0
+# Low value because Turn Processor is now the conversational brain — it
+# needs to fire promptly when the user finishes a thought.
+TURN_DEBOUNCE_SECONDS = 1.5
 
 # Redis-backed single-flight TTL (secs). Slightly longer than the Turn Processor's
 # soft_time_limit (40s) so the lock clears naturally if the task crashes.
