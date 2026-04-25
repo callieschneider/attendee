@@ -29,6 +29,10 @@ _LIVE_READ_ONLY_TOOL_NAMES = {
     "web_search",
     "fetch_url",
     "read_recent_chat",
+    # Visual tools — write-mutating but user-facing and idempotent.
+    # The canvas pump picks up the new spec on its next tick (~3s).
+    "create_visual",
+    "update_visual",
 }
 
 

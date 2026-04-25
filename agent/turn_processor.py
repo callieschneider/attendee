@@ -478,9 +478,10 @@ def _render_user_prompt(
             "## Voice conversation is live — do NOT speak"
             "\nGemini Live is handling the spoken conversation right now. "
             "Your ONLY job this turn is silent actions: capture tasks, "
-            "save artifacts, save URLs, queue emails. You MUST NOT call "
-            "`speak_via_voice` or `send_chat_message`. If nothing in the "
-            "chunk warrants a silent action, reply with exactly 'noop'."
+            "save artifacts, save URLs, create/update visualizations on the "
+            "bot's canvas, or queue emails. You MUST NOT call `speak_via_voice` "
+            "or `send_chat_message`. If nothing in the chunk warrants a silent "
+            "action, reply with exactly 'noop'."
         )
     else:
         lines.append(

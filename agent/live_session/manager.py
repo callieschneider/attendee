@@ -41,7 +41,8 @@ GEMINI_OUTPUT_RATE = 24000
 
 
 # Tools considered safe to execute DIRECTLY from Gemini Live's toolCall stream
-# (no write side-effects). All other tools must go through the Turn Processor.
+# (no race conditions with the Turn Processor). All other tools must go through
+# the Turn Processor where they're tracked in ActionLogEntry.
 _LIVE_READ_ONLY_TOOLS = {
     "get_recent_occurrences",
     "get_occurrence_transcript",
@@ -56,6 +57,12 @@ _LIVE_READ_ONLY_TOOLS = {
     "web_search",
     "fetch_url",
     "read_recent_chat",
+    # Visual tools — write-mutating but idempotent, user-facing, and the
+    # canvas pump picks up changes on its next tick. Letting Gemini Live
+    # call these directly avoids the user hearing "I can't do that" when
+    # they ask for a chart on the bot's video.
+    "create_visual",
+    "update_visual",
 }
 
 

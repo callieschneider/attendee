@@ -64,21 +64,31 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
     return {"updated": True, "visual_id": visual_id}
 
 
+_SPEC_DESCRIPTION = (
+    "JSON spec describing what to render on the bot's canvas video tile. "
+    "Supported types:\n"
+    "  - {\"type\":\"bar\", \"data\":[{\"label\":\"Q1\",\"value\":120}, …]} — bar/column chart\n"
+    "  - {\"type\":\"list\", \"items\":[\"foo\",\"bar\", …]} — bullet list\n"
+    "  - {\"type\":\"table\", \"rows\":[[\"Name\",\"Status\"],[\"Foo\",\"OK\"], …]} — first row is header\n"
+    "  - {\"type\":\"text\", \"text\":\"…\"} — plain text card\n"
+    "Pick the simplest type that fits. Keep data small (≤12 items)."
+)
+
+
 TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_visual",
         description=(
-            "Create a visual (chart, slide, diagram) by spec. Renders in Phase 6; "
-            "for now this stores the spec so it can be referenced later."
+            "Render a chart, list, table, or text card on the bot's video "
+            "tile in the meeting (the canvas updates within ~3 seconds). "
+            "Use this any time the user asks to 'show', 'display', 'put up', "
+            "'draw', 'visualize', or anything similar."
         ),
         input_schema=ToolSchema(
             type="object",
             properties={
-                "title": {"type": "string", "description": "Short title for the visual."},
-                "spec": {
-                    "type": "object",
-                    "description": "JSON spec (e.g. Vega-Lite, or a simple chart config).",
-                },
+                "title": {"type": "string", "description": "Short title shown above the visual."},
+                "spec": {"type": "object", "description": _SPEC_DESCRIPTION},
             },
             required=["spec"],
         ),
@@ -86,12 +96,12 @@ TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="update_visual",
-        description="Update the JSON spec of an existing visual by ID.",
+        description="Replace the spec of an existing visual by ID. Same shape as create_visual.spec.",
         input_schema=ToolSchema(
             type="object",
             properties={
-                "visual_id": {"type": "string", "description": "Visual artifact UUID."},
-                "spec": {"type": "object", "description": "New spec JSON."},
+                "visual_id": {"type": "string", "description": "Visual artifact UUID returned by create_visual."},
+                "spec": {"type": "object", "description": _SPEC_DESCRIPTION},
             },
             required=["visual_id", "spec"],
         ),
