@@ -343,11 +343,13 @@ class LiveSessionManager:
                     continue
                 # Mark "bot is currently speaking" — used by the audio pump
                 # to drop incoming mic audio for the duration of bot speech
-                # + a small echo-tail window. Each audio frame extends
-                # this. Trimmed to 0.12s so user interruptions land in
-                # under ~150ms — anything higher feels laggy ("I'm trying
-                # to butt in but she keeps talking").
-                self._bot_speaking_until = time.monotonic() + 0.12
+                # + a short echo-tail window. Each audio frame extends
+                # this. Set to 0.30s — long enough to swallow the
+                # Attendee→Meet→back-to-Attendee echo loop (~150-250ms
+                # round trip) without making real interrupts feel laggy.
+                # When Gemini detects a real interrupt it resets this to
+                # 0 immediately (see server_content.interrupted handler).
+                self._bot_speaking_until = time.monotonic() + 0.30
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:

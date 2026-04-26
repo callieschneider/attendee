@@ -34,12 +34,13 @@ log = logging.getLogger("agent.canvas.renderer")
 _WIDTH = 1280
 _HEIGHT = 720
 
-# Layout
+# Layout — chat 25% (left), visual 75% (right). Visual is the showpiece.
 TOP_BAR_H = 64
 BOTTOM_BAR_H = 36
 PANE_PAD_X = 28
 PANE_PAD_Y = 24
-MID = _WIDTH // 2  # vertical divider
+MID = _WIDTH // 4  # vertical divider — chat is 0..MID, canvas is MID.._WIDTH
+FEED_PAD_X = 14    # chat pane is narrow (320px); use tighter horizontal padding
 CONTENT_TOP = TOP_BAR_H
 CONTENT_BOTTOM = _HEIGHT - BOTTOM_BAR_H
 
@@ -272,13 +273,13 @@ def _draw_bottom_bar(draw, state, fonts):
 
 
 def _draw_feed_pane(draw, state, fonts):
-    L = PANE_PAD_X
-    R = MID - PANE_PAD_X
+    L = FEED_PAD_X
+    R = MID - FEED_PAD_X
     top = CONTENT_TOP + PANE_PAD_Y
     bot = CONTENT_BOTTOM - PANE_PAD_Y
 
     draw.text((L, top), "Conversation", fill=MUTED, font=fonts.h2)
-    top += 26
+    top += 22
 
     rows = _build_feed_rows(state)
     if not rows:
@@ -287,17 +288,19 @@ def _draw_feed_pane(draw, state, fonts):
 
     # Pre-measure heights bottom-up so the most recent items are guaranteed
     # to render. Older items are dropped silently when there's no room.
+    # Narrow column → smaller font, tighter line height, more wrapped lines OK.
+    body_font = fonts.small_b if False else fonts.body  # keep readable
+    line_h = 18
     avail_w = R - L
-    # Rendered tuples: (row, height, lines_or_none)
     rendered: list[tuple[dict, int, list[str] | None]] = []
     height_used = 0
     for row in reversed(rows):
         if row["type"] == "action":
-            h = 30 + 8  # chip height + gap
+            h = 28 + 6  # chip height + gap
             wrapped = None
         else:
-            wrapped = _wrap_text(draw, row["text"], fonts.body, avail_w - 24)
-            h = 28 + 6 + len(wrapped) * 22 + 14  # header + gap + body lines + bottom pad
+            wrapped = _wrap_text(draw, row["text"], body_font, avail_w - 16, max_lines=12)
+            h = 26 + 4 + len(wrapped) * line_h + 12  # header + gap + lines + bottom pad
         if height_used + h > (bot - top):
             break
         rendered.insert(0, (row, h, wrapped))
@@ -368,28 +371,28 @@ def _build_feed_rows(state) -> list[dict]:
 
 
 def _draw_speaker_card(draw, row, lines, L, R, y, h, fonts):
-    """A single conversation turn rendered as a card."""
+    """A single conversation turn rendered as a card. Narrow-column friendly."""
     card_top = y
-    card_bot = y + h - 6  # leave a 6px gap before next card
-    pad_x = 12
-    pad_y = 8
+    card_bot = y + h - 4  # tight gap so feed packs more
+    pad_x = 8
+    pad_y = 6
 
     # Card background — different tint for chat vs voice
     is_chat = row["kind"] == "chat"
     bg = BG_CARD_HI if is_chat else BG_CARD
     draw.rounded_rectangle(
         (L, card_top, R, card_bot),
-        radius=10,
+        radius=8,
         fill=bg,
         outline=BORDER_SOFT,
         width=1,
     )
 
-    # Header row: avatar + speaker (left) ··· timestamp (right-aligned)
+    # Header row: avatar + speaker (left) ··· timestamp (right)
     header_y = card_top + pad_y
-    avatar_size = 18
+    avatar_size = 14
     avatar_x = L + pad_x
-    avatar_y = header_y + 1
+    avatar_y = header_y + 2
     avatar_color = SPEAKER_CHAT if is_chat else SPEAKER_USER
     draw.ellipse(
         (avatar_x, avatar_y, avatar_x + avatar_size, avatar_y + avatar_size),
@@ -399,75 +402,63 @@ def _draw_speaker_card(draw, row, lines, L, R, y, h, fonts):
     initial = (row["who"][:1] or "?").upper()
     iw = _text_w(draw, initial, fonts.small_b)
     draw.text(
-        (avatar_x + (avatar_size - iw) // 2, avatar_y + 2),
+        (avatar_x + (avatar_size - iw) // 2, avatar_y + 1),
         initial, fill=avatar_color, font=fonts.small_b,
     )
 
-    # Timestamp (right) — measure first so we know where it starts
+    # Timestamp (right). Use small font so it doesn't crowd the name.
     ts = _short_time(row["ts"]) or ""
     tw = _text_w(draw, ts, fonts.time)
     ts_x = R - pad_x - tw
-    ts_y = header_y + 4
+    ts_y = header_y + 2
     draw.text((ts_x, ts_y), ts, fill=MUTED_DIM, font=fonts.time)
 
-    # Speaker name — truncate to fit between avatar and timestamp
-    name_x = avatar_x + avatar_size + 10
-    name_max_w = ts_x - name_x - 10
-    who = _truncate_to_width(draw, row["who"], fonts.body_b, name_max_w)
-    draw.text((name_x, header_y + 1), who, fill=avatar_color, font=fonts.body_b)
+    # Speaker name — first name only, truncated. Use small bold so it fits.
+    name_x = avatar_x + avatar_size + 6
+    name_max_w = ts_x - name_x - 6
+    full_name = (row["who"] or "?")
+    short_name = full_name.split()[0] if full_name.split() else full_name
+    who = _truncate_to_width(draw, short_name, fonts.small_b, name_max_w)
+    draw.text((name_x, header_y + 2), who, fill=avatar_color, font=fonts.small_b)
 
-    # Tag for chat
-    if is_chat:
-        tag = "chat"
-        tag_x = name_x + _text_w(draw, who, fonts.body_b) + 8
-        if tag_x + _text_w(draw, tag, fonts.small_b) + 12 < ts_x:
-            tag_w = _text_w(draw, tag, fonts.small_b) + 10
-            draw.rounded_rectangle(
-                (tag_x, header_y + 4, tag_x + tag_w, header_y + 17),
-                radius=6, fill=BG_PANE, outline=SPEAKER_CHAT, width=1,
-            )
-            draw.text((tag_x + 5, header_y + 4), tag, fill=SPEAKER_CHAT, font=fonts.small_b)
-
-    # Body
-    body_y = header_y + 26
-    line_h = 22
+    # Body — tighter line height
+    body_y = header_y + 18
+    line_h = 18
     for line in lines:
-        if body_y + line_h > card_bot - pad_y + 6:
+        if body_y + line_h > card_bot - pad_y + 4:
             break
         draw.text((L + pad_x, body_y), line, fill=FG_BODY, font=fonts.body)
         body_y += line_h
 
 
 def _draw_action_chip(draw, row, L, R, y, fonts):
-    """A compact one-line tool action chip."""
-    h = 26
+    """A compact one-line tool action chip — narrow-column friendly."""
+    h = 22
     draw.rounded_rectangle(
         (L, y, R, y + h),
-        radius=8,
+        radius=6,
         fill=BG_CARD,
         outline=BORDER_SOFT, width=1,
     )
     sym = row.get("symbol", "•")
-    sym_w = _text_w(draw, sym, fonts.body_b)
-    sym_x = L + 12
-    draw.text((sym_x, y + 4), sym, fill=row["color"], font=fonts.body_b)
+    sym_w = _text_w(draw, sym, fonts.small_b)
+    sym_x = L + 8
+    draw.text((sym_x, y + 4), sym, fill=row["color"], font=fonts.small_b)
 
     label = row["label"]
-    label_x = sym_x + sym_w + 10
-    label_y = y + 5
+    label_x = sym_x + sym_w + 6
+    label_y = y + 4
 
     # Timestamp on right
     ts = _short_time(row["ts"]) or ""
     tw = _text_w(draw, ts, fonts.time)
-    ts_x = R - 12 - tw
-    draw.text((ts_x, y + 7), ts, fill=MUTED_DIM, font=fonts.time)
+    ts_x = R - 8 - tw
+    draw.text((ts_x, y + 5), ts, fill=MUTED_DIM, font=fonts.time)
 
-    # Sub message (errors): if it fits, append it after the label in muted
-    label_max_w = ts_x - label_x - 10
-    sub = row.get("sub") or ""
-    text = label if not sub else f"{label} — {sub}"
-    text = _truncate_to_width(draw, text, fonts.body, label_max_w)
-    draw.text((label_x, label_y), text, fill=FG_BODY, font=fonts.body)
+    # Truncate label to fit
+    label_max_w = ts_x - label_x - 8
+    text = _truncate_to_width(draw, label, fonts.small_b, label_max_w)
+    draw.text((label_x, label_y), text, fill=FG_BODY, font=fonts.small_b)
 
 
 # ── Visual pane (right) ──────────────────────────────────────────────────────
@@ -506,6 +497,18 @@ def _draw_visual_pane(draw, state, fonts):
             return
         if chart_type == "text":
             _draw_text_card(draw, spec, L, R, top, bot, fonts)
+            return
+        if chart_type == "line":
+            _draw_line_chart(draw, spec, L, R, top, bot, fonts)
+            return
+        if chart_type == "pie":
+            _draw_pie_chart(draw, spec, L, R, top, bot, fonts)
+            return
+        if chart_type == "kpi":
+            _draw_kpi(draw, spec, L, R, top, bot, fonts)
+            return
+        if chart_type == "flow":
+            _draw_flow(draw, spec, L, R, top, bot, fonts)
             return
     except Exception:
         log.exception("_draw_visual_pane: render failed for spec_type=%s", chart_type)
@@ -644,6 +647,362 @@ def _draw_list(draw, spec, L, R, y_top, y_bot, fonts):
         y += line_h
         if y > y_bot - 10:
             break
+
+
+# ── Chart palette ────────────────────────────────────────────────────────────
+
+
+def _palette(n: int) -> list[tuple[int, int, int]]:
+    """Return n distinct colors from a fixed accent palette, cycling if needed."""
+    base = [
+        ACCENT,
+        OK,
+        WARN,
+        SPEAKER_USER,
+        SPEAKER_CHAT,
+        SPEAKER_BOT,
+        ERR,
+    ]
+    return [base[i % len(base)] for i in range(max(0, n))]
+
+
+# ── Line chart ───────────────────────────────────────────────────────────────
+
+
+def _draw_line_chart(draw, spec, L, R, y_top, y_bot, fonts):
+    try:
+        series = spec.get("series", []) or []
+        if not series:
+            return
+        left_margin = 60
+        bottom_margin = 30
+        top_margin = 20
+        right_margin = 20
+        plot_left = L + left_margin
+        plot_right = R - right_margin
+        plot_top = y_top + top_margin
+        plot_bot = y_bot - bottom_margin
+        plot_width = plot_right - plot_left
+        plot_height = plot_bot - plot_top
+        all_y: list[float] = []
+        for s in series[:4]:
+            for p in s.get("data", []) or []:
+                try:
+                    all_y.append(float(p.get("y", 0)))
+                except Exception:
+                    continue
+        if not all_y:
+            return
+        y_min = min(all_y)
+        y_max = max(all_y)
+        if y_min == y_max:
+            y_min -= 1
+            y_max += 1
+        # Y-axis gridlines + labels
+        for i in range(5):
+            y = plot_bot - i * plot_height // 4
+            draw.line((plot_left, y, plot_right, y), fill=BORDER_SOFT)
+            val = y_min + (y_max - y_min) * i / 4
+            txt = _fmt_number(val)
+            w = _text_w(draw, txt, fonts.small)
+            draw.text((plot_left - w - 6, y - fonts.small.size // 2), txt, font=fonts.small, fill=MUTED)
+        # X-axis labels (use first series for x labels)
+        first_data = (series[0].get("data") or [])
+        xs = [str(p.get("x", "")) for p in first_data]
+        n_pts = len(xs)
+        if n_pts == 0:
+            return
+        step = plot_width / max(n_pts - 1, 1)
+        skip = max(1, n_pts // 8)
+        for i, x in enumerate(xs):
+            if i % skip != 0:
+                continue
+            x_pos = plot_left + i * step
+            txt = _truncate_to_width(draw, x, fonts.small, 80)
+            w = _text_w(draw, txt, fonts.small)
+            draw.text((int(x_pos - w / 2), plot_bot + 6), txt, font=fonts.small, fill=MUTED)
+        # Plot each series
+        colors = _palette(len(series[:4]))
+        for s_idx, s in enumerate(series[:4]):
+            data = s.get("data", []) or []
+            if not data:
+                continue
+            col = colors[s_idx]
+            points: list[tuple[float, float]] = []
+            for i, p in enumerate(data):
+                try:
+                    yv = float(p.get("y", 0))
+                except Exception:
+                    continue
+                x = plot_left + i * step
+                y = plot_bot - (yv - y_min) * plot_height / (y_max - y_min)
+                points.append((x, y))
+            if len(points) >= 2:
+                draw.line(points, fill=col, width=2)
+            for (x, y) in points:
+                r = 3
+                draw.ellipse((x - r, y - r, x + r, y + r), fill=col, outline=col)
+        # Legend (top-right inside plot)
+        leg_y = plot_top + 4
+        for s_idx, s in enumerate(series[:4]):
+            col = colors[s_idx]
+            label = s.get("label", "") or ""
+            lw = _text_w(draw, label, fonts.small_b)
+            r = 4
+            dot_x = plot_right - lw - 14
+            draw.ellipse((dot_x - r, leg_y + 4, dot_x + r, leg_y + 4 + 2 * r), fill=col)
+            draw.text((dot_x + r + 6, leg_y), label, font=fonts.small_b, fill=FG_BODY)
+            leg_y += fonts.small_b.size + 4
+    except Exception:
+        log.exception("_draw_line_chart: failed")
+
+
+# ── Pie chart ────────────────────────────────────────────────────────────────
+
+
+def _draw_pie_chart(draw, spec, L, R, y_top, y_bot, fonts):
+    try:
+        data = list(spec.get("data", []) or [])
+        if not data:
+            return
+        total = 0.0
+        for item in data:
+            try:
+                total += float(item.get("value", 0))
+            except Exception:
+                continue
+        if total <= 0:
+            return
+        data = sorted(data, key=lambda d: float(d.get("value", 0) or 0), reverse=True)
+        if len(data) > 8:
+            shown = data[:7]
+            other_val = sum(float(d.get("value", 0) or 0) for d in data[7:])
+            shown.append({"label": "Other", "value": other_val})
+            data = shown
+        colors = _palette(len(data))
+        width = R - L
+        height = y_bot - y_top
+        # Pie on the left ~45% of the pane
+        pie_zone_w = int(width * 0.45)
+        cx = L + pie_zone_w // 2
+        cy = y_top + height // 2
+        radius = min(pie_zone_w // 2 - 10, height // 2 - 10)
+        if radius < 30:
+            return
+        bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
+        start = -90.0  # top
+        for idx, item in enumerate(data):
+            try:
+                val = float(item.get("value", 0))
+            except Exception:
+                continue
+            if val <= 0:
+                continue
+            end = start + 360.0 * val / total
+            draw.pieslice(bbox, start, end, fill=colors[idx], outline=BG_PANE, width=2)
+            start = end
+        # Legend on the right half
+        leg_x = L + pie_zone_w + 30
+        leg_y = y_top + 10
+        line_h = max(fonts.body.size + 8, 22)
+        for idx, item in enumerate(data):
+            col = colors[idx]
+            try:
+                val = float(item.get("value", 0))
+            except Exception:
+                val = 0.0
+            label = str(item.get("label", "")) or "—"
+            pct = val / total * 100 if total else 0
+            txt = f"{label}  {_fmt_number(val)}  ({pct:.0f}%)"
+            txt = _truncate_to_width(draw, txt, fonts.body, R - leg_x - 14)
+            r = 5
+            draw.ellipse((leg_x, leg_y + 5, leg_x + 2 * r, leg_y + 5 + 2 * r), fill=col)
+            draw.text((leg_x + 2 * r + 8, leg_y), txt, font=fonts.body, fill=FG_BODY)
+            leg_y += line_h
+            if leg_y > y_bot - line_h:
+                break
+    except Exception:
+        log.exception("_draw_pie_chart: failed")
+
+
+# ── KPI cards ────────────────────────────────────────────────────────────────
+
+
+def _draw_kpi(draw, spec, L, R, y_top, y_bot, fonts):
+    try:
+        items = list(spec.get("items", []) or [])
+        if not items:
+            return
+        items = items[:8]
+        n = len(items)
+        if n <= 4:
+            cols = 2 if n >= 2 else 1
+        elif n <= 6:
+            cols = 3
+        else:
+            cols = 4
+        gap = 14
+        width = R - L
+        height = y_bot - y_top
+        rows_n = (n + cols - 1) // cols
+        card_w = (width - (cols - 1) * gap) // cols
+        card_h = (height - (rows_n - 1) * gap) // rows_n
+        for idx, item in enumerate(items):
+            col_idx = idx % cols
+            row_idx = idx // cols
+            x0 = L + col_idx * (card_w + gap)
+            y0 = y_top + row_idx * (card_h + gap)
+            x1 = x0 + card_w
+            y1 = y0 + card_h
+            draw.rounded_rectangle(
+                (x0, y0, x1, y1), radius=10,
+                fill=BG_CARD, outline=BORDER_SOFT, width=1,
+            )
+            label = str(item.get("label", "")).upper()
+            label = _truncate_to_width(draw, label, fonts.small_b, card_w - 16)
+            lw = _text_w(draw, label, fonts.small_b)
+            draw.text((x0 + (card_w - lw) // 2, y0 + 12), label, font=fonts.small_b, fill=MUTED)
+            val = str(item.get("value", "")) or "—"
+            val_font = fonts.viz_title
+            val_truncated = _truncate_to_width(draw, val, val_font, card_w - 12)
+            vw = _text_w(draw, val_truncated, val_font)
+            draw.text(
+                (x0 + (card_w - vw) // 2, y0 + (card_h - val_font.size) // 2 - 4),
+                val_truncated, font=val_font, fill=FG,
+            )
+            delta = str(item.get("delta", "") or "")
+            d_dir = (item.get("delta_dir") or "").lower()
+            delta_color = OK if d_dir == "up" else (ERR if d_dir == "down" else MUTED_DIM)
+            if delta:
+                dw = _text_w(draw, delta, fonts.body_b)
+                # Draw a small filled triangle (rendered as a polygon — works
+                # regardless of which fonts have triangle glyphs available).
+                arrow_w = 10 if d_dir in ("up", "down") else 0
+                gap_w = 6 if arrow_w else 0
+                total_w = arrow_w + gap_w + dw
+                start_x = x0 + (card_w - total_w) // 2
+                text_y = y1 - fonts.body_b.size - 12
+                if d_dir == "up":
+                    cy = text_y + fonts.body_b.size // 2
+                    draw.polygon(
+                        [(start_x, cy + 5), (start_x + 10, cy + 5), (start_x + 5, cy - 5)],
+                        fill=OK,
+                    )
+                elif d_dir == "down":
+                    cy = text_y + fonts.body_b.size // 2
+                    draw.polygon(
+                        [(start_x, cy - 5), (start_x + 10, cy - 5), (start_x + 5, cy + 5)],
+                        fill=ERR,
+                    )
+                draw.text(
+                    (start_x + arrow_w + gap_w, text_y),
+                    delta, font=fonts.body_b, fill=delta_color,
+                )
+    except Exception:
+        log.exception("_draw_kpi: failed")
+
+
+# ── Flow diagram ─────────────────────────────────────────────────────────────
+
+
+def _draw_flow(draw, spec, L, R, y_top, y_bot, fonts):
+    try:
+        nodes = list(spec.get("nodes", []) or [])
+        edges = list(spec.get("edges", []) or [])
+        if not nodes:
+            return
+        nodes = nodes[:6]
+        n = len(nodes)
+        width = R - L
+        height = y_bot - y_top
+        gap = 20
+        if n <= 4:
+            cols = n
+            rows_n = 1
+        else:
+            cols = (n + 1) // 2
+            rows_n = 2
+        node_w = (width - (cols - 1) * gap) // max(cols, 1)
+        node_h = min(80, (height - (rows_n - 1) * gap) // max(rows_n, 1))
+        # Center the grid vertically
+        grid_h = rows_n * node_h + (rows_n - 1) * gap
+        offset_y = (height - grid_h) // 2
+        pos: dict[str, tuple[int, int, int, int]] = {}
+        for idx, node in enumerate(nodes):
+            nid = str(node.get("id", f"_n{idx}"))
+            col = idx % cols
+            row = idx // cols
+            x0 = L + col * (node_w + gap)
+            y0 = y_top + offset_y + row * (node_h + gap)
+            x1 = x0 + node_w
+            y1 = y0 + node_h
+            pos[nid] = (x0, y0, x1, y1)
+            draw.rounded_rectangle(
+                (x0, y0, x1, y1), radius=10,
+                fill=BG_CARD, outline=ACCENT, width=2,
+            )
+            label = str(node.get("label", "")) or nid
+            label = _truncate_to_width(draw, label, fonts.body_b, node_w - 12)
+            tw = _text_w(draw, label, fonts.body_b)
+            draw.text(
+                (x0 + (node_w - tw) // 2, y0 + (node_h - fonts.body_b.size) // 2),
+                label, font=fonts.body_b, fill=FG,
+            )
+        # Edges
+        for edge in edges:
+            src = str(edge.get("from", ""))
+            dst = str(edge.get("to", ""))
+            if src not in pos or dst not in pos:
+                continue
+            sx0, sy0, sx1, sy1 = pos[src]
+            dx0, dy0, dx1, dy1 = pos[dst]
+            scy = (sy0 + sy1) / 2
+            dcy = (dy0 + dy1) / 2
+            if abs(scy - dcy) < 4 and dx0 > sx1:
+                # Horizontal edge: right-of-src → left-of-dst
+                x_start = sx1
+                x_end = dx0
+                y_start = scy
+                y_end = dcy
+            elif sy0 == dy0 and dx0 < sx0:
+                # Reversed horizontal (rare): left-of-src → right-of-dst
+                x_start = sx0
+                x_end = dx1
+                y_start = scy
+                y_end = dcy
+            else:
+                # General case: src bottom → dst top, or vice versa
+                if dcy >= scy:
+                    x_start = (sx0 + sx1) / 2
+                    y_start = sy1
+                    x_end = (dx0 + dx1) / 2
+                    y_end = dy0
+                else:
+                    x_start = (sx0 + sx1) / 2
+                    y_start = sy0
+                    x_end = (dx0 + dx1) / 2
+                    y_end = dy1
+            draw.line(
+                (x_start, y_start, x_end, y_end),
+                fill=ACCENT_SOFT, width=2,
+            )
+            # Arrowhead pointing toward (x_end, y_end)
+            import math
+            dx = x_end - x_start
+            dy = y_end - y_start
+            length = max(1.0, math.hypot(dx, dy))
+            ux, uy = dx / length, dy / length
+            ah = 8
+            # Two side points, perpendicular to direction
+            px, py = -uy, ux
+            tip = (x_end, y_end)
+            base_x = x_end - ux * ah
+            base_y = y_end - uy * ah
+            left = (base_x + px * ah * 0.5, base_y + py * ah * 0.5)
+            right = (base_x - px * ah * 0.5, base_y - py * ah * 0.5)
+            draw.polygon([tip, left, right], fill=ACCENT_SOFT)
+    except Exception:
+        log.exception("_draw_flow: failed")
 
 
 def _draw_table(draw, spec, L, R, y_top, y_bot, fonts):

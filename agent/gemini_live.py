@@ -121,17 +121,23 @@ def build_live_setup(
         "contextWindowCompression": {"slidingWindow": {}},
         "inputAudioTranscription": {},
         "outputAudioTranscription": {},
-        # Aggressive VAD so the user can interrupt mid-sentence and so the
-        # first utterance after silence registers immediately. Defaults are
-        # tuned for human-to-human pacing; for a meeting bot we want
-        # snappier turn-taking.
+        # VAD tuned for a meeting bot. The bot's own TTS comes back through
+        # the meeting's mixed audio (we suppress most of it via
+        # _bot_speaking_until in LiveSessionManager, but a tail bleeds
+        # through). With HIGH start sensitivity that bleed used to trip
+        # Gemini's interrupt detection — it would cut itself off mid-
+        # sentence, restart, get echo'd again, and the user heard the bot
+        # repeating itself. LOW start sensitivity ignores that quiet echo
+        # while still firing on real user voice (which arrives louder
+        # through the meeting mix). End sensitivity stays HIGH so turn-
+        # ending is snappy.
         "realtimeInputConfig": {
             "automaticActivityDetection": {
                 "disabled": False,
-                "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
                 "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
-                "prefixPaddingMs": 20,
-                "silenceDurationMs": 100,
+                "prefixPaddingMs": 60,
+                "silenceDurationMs": 250,
             },
         },
     }

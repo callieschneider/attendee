@@ -135,21 +135,33 @@ _SPEC_DESCRIPTION = (
     "server-rendered shapes — they appear in <500ms. The `html` shape is a last-resort\n"
     "fallback for genuinely custom layouts and adds 2-5s of headless-Chrome overhead.\n"
     "\n"
-    "FAST shapes (use these for ~90% of cases):\n"
-    '  - {"type":"list","items":["foo","bar", ...]}                     — bullet list (use for "show me bullet points / 5 things / a list")\n'
-    '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}        — bar chart\n'
-    '  - {"type":"table","rows":[["Name","Status"],["Foo","OK"], ...]}  — first row is header\n'
-    '  - {"type":"text","text":"..."}                                   — single text card\n'
+    "FAST shapes (use these for ~95% of cases):\n"
+    '  - {"type":"list","items":["foo","bar", ...]}                     — bullet list. Items support **bold**, *italic*, `code`.\n'
+    '  - {"type":"text","text":"# Heading\\n**bold** and *italic*..."}    — text card. Supports markdown headings, lists, bold/italic/code, plus simple HTML (<b>/<i>/<code>/<br>/<p>/<h1-3>/<ul>/<ol>/<li>).\n'
+    '  - {"type":"table","rows":[["Name","Status"],["Foo","OK"], ...]}  — first row is header. Up to 18 rows, 8 cols.\n'
     "\n"
-    "SLOW shape (only when the above genuinely cannot express what was asked):\n"
+    "DATA VISUALIZATIONS (use when the user asks for a chart/graph/diagram):\n"
+    '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}                         — bar chart, ≤12 bars\n'
+    '  - {"type":"line","series":[{"label":"Revenue","data":[{"x":"Jan","y":100}, ...]}]} — line chart, up to 4 series, points share x-axis\n'
+    '  - {"type":"pie","data":[{"label":"iOS","value":60},{"label":"Android","value":40}]} — pie chart with legend, ≤8 slices (rest groups into "Other")\n'
+    '  - {"type":"kpi","items":[{"label":"MRR","value":"$42k","delta":"+8%","delta_dir":"up"}, ...]} — big-number KPI cards, ≤8 items. delta_dir is "up"/"down" for green/red arrow\n'
+    '  - {"type":"flow","nodes":[{"id":"a","label":"Discover"},{"id":"b","label":"Build"}],"edges":[{"from":"a","to":"b"}]} — simple flowchart/diagram, ≤6 nodes\n'
+    "\n"
+    "SLOW shape (only when nothing above can express what was asked):\n"
     '  - {"type":"html","html":"<!DOCTYPE html><html>...</html>","title":"..."}\n'
     "      Full self-contained HTML page (inline CSS+SVG, no JS, no external resources).\n"
     "      Theme: dark bg #0a0b0f, light text #e5e7eb, accent #a5b4fc.\n"
     "      DO NOT compose long HTML inside this arg yourself; if you go this route,\n"
     "      first call `call_model` to draft the HTML, then pass it here.\n"
     "\n"
-    "Keep data small (≤12 items). Always include a `type` field. For 'show 5 bullet "
-    "points', the right answer is `{\"type\":\"list\",\"items\":[...]}` — never html."
+    "Keep data small (≤12 items). Always include a `type` field. Picking the right type:\n"
+    "  • 'show me 5 bullet points / a list of X' → list\n"
+    "  • 'show a chart of revenue by quarter'    → bar\n"
+    "  • 'plot X over time / show the trend'     → line\n"
+    "  • 'breakdown of / share of / split'       → pie\n"
+    "  • 'KPIs / dashboard numbers'              → kpi\n"
+    "  • 'workflow / diagram / steps'            → flow\n"
+    "  • a paragraph of formatted text           → text"
 )
 
 
