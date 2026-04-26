@@ -119,10 +119,13 @@ def _process_turn(
         #   - self-utterances (bot's own TTS played back through mixed audio)
         #   - gemini_live transcripts (those are display-only; Attendee
         #     webhooks are the canonical source for the agent loop)
+        # NOTE: JSONField .exclude(key=val) silently drops rows where the key
+        # is absent (NOT NULL == NULL == false). Use null-safe Q filters.
+        from django.db.models import Q
         qs = (
             TranscriptEvent.objects.filter(bot_id=bot_id)
-            .exclude(raw__self_utterance=True)
-            .exclude(raw__source="gemini_live")
+            .filter(Q(raw__self_utterance__isnull=True) | Q(raw__self_utterance=False))
+            .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
         )
         if cursor.cursor_event_time:
             qs = qs.filter(event_time__gt=cursor.cursor_event_time)
@@ -155,6 +158,11 @@ def _process_turn(
         "series_id": (ctx_result.get("series") or {}).get("id"),
         "occurrence_id": _occurrence_id_for_bot(bot_id),
     }
+
+    # region agent log
+    log.warning("DBG68285d C turn_running bot=%s priority=%s series_id=%s chunk=%d trigger=%s",
+        bot_id, priority, exec_ctx.get("series_id"), len(chunk), trigger_kind)
+    # endregion
 
     # ── Run the multi-round agent loop ───────────────────────────────────────
     loop_result = _run_agent_loop(
@@ -375,6 +383,9 @@ def _run_agent_loop(
             )
 
             started = time.time()
+            # region agent log
+            log.warning("DBG68285d C tool_executing bot=%s tool=%s input=%r", bot_id, tool_name, str(tool_input)[:200])
+            # endregion
             try:
                 result = execute_tool(tool_name, tool_input, exec_ctx)
                 if isinstance(result, dict) and result.get("error"):
@@ -618,12 +629,11 @@ def _render_user_prompt(
         )
     elif voice_conversation_active:
         lines.append(
-            "The user is in active voice conversation with you. Gemini Live "
-            "is the voice. Your job: handle the action side — call the tools "
-            "needed to fulfill the request (search, list, create, update, "
-            "create_visual…) and rely on the voice briefing pushed after this "
-            "turn to keep Live in sync. Do NOT call `speak_via_voice` or "
-            "`send_chat_message`; Live owns the mic."
+            "Your audio channel is currently engaged with the user. Handle the "
+            "action side here: call the tools needed to fulfill the request "
+            "(search, list, create, update, create_visual…). Do NOT call "
+            "`speak_via_voice` or `send_chat_message` — the audio side is "
+            "already replying."
         )
     else:
         lines.append(

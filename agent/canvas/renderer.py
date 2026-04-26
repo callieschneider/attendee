@@ -22,6 +22,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 from typing import Any
 
 from django.utils import timezone
@@ -87,6 +88,7 @@ def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
         h2=_load_font(14, bold=True),
         body=_load_font(15),
         body_b=_load_font(15, bold=True),
+        italic=_load_font(15, italic=True),
         small=_load_font(11),
         small_b=_load_font(11, bold=True),
         time=_load_font(11, mono=True),
@@ -143,7 +145,7 @@ def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
 
 class _Fonts:
     __slots__ = (
-        "brand", "h1", "h2", "body", "body_b", "small", "small_b",
+        "brand", "h1", "h2", "body", "body_b", "italic", "small", "small_b",
         "time", "mono", "viz_title", "list_item", "big_label",
     )
 
@@ -601,8 +603,8 @@ def _draw_list(draw, spec, L, R, y_top, y_bot, fonts):
     line_h = 38
     max_w = R - L - 30
     for i, item in enumerate(items[:12]):
+        # Markdown-aware items: strip inline markers for length budget but render styled.
         text = str(item)
-        text = _truncate_to_width(draw, text, fonts.list_item, max_w)
         # Bullet circle with index
         idx = str(i + 1)
         circle_x = L
@@ -617,7 +619,28 @@ def _draw_list(draw, spec, L, R, y_top, y_bot, fonts):
             (circle_x + (circle_d - iw) // 2, circle_y + 4),
             idx, fill=ACCENT_SOFT, font=fonts.small_b,
         )
-        draw.text((circle_x + circle_d + 12, y + 3), text, fill=FG, font=fonts.list_item)
+        # Plain text path: keep the existing list-item font (17pt) for legibility.
+        # Inline **bold** / *italic* / `code` get respected via stripped fallback when present.
+        if any(m in text for m in ("**", "*", "`", "_")):
+            runs = _md_parse_inline(text)
+            cur_x = circle_x + circle_d + 12
+            for run_txt, st in runs:
+                if st == "bold":
+                    f = fonts.body_b
+                elif st == "italic":
+                    f = getattr(fonts, "italic", None) or fonts.list_item
+                elif st == "mono":
+                    f = fonts.mono
+                else:
+                    f = fonts.list_item
+                seg = _truncate_to_width(draw, run_txt, f, max(0, R - cur_x - 8))
+                draw.text((cur_x, y + 3), seg, fill=FG, font=f)
+                cur_x += _text_w(draw, seg, f)
+                if cur_x >= R - 8:
+                    break
+        else:
+            text = _truncate_to_width(draw, text, fonts.list_item, max_w)
+            draw.text((circle_x + circle_d + 12, y + 3), text, fill=FG, font=fonts.list_item)
         y += line_h
         if y > y_bot - 10:
             break
@@ -658,22 +681,17 @@ def _draw_text_card(draw, spec, L, R, y_top, y_bot, fonts):
     if not text:
         return
     pad = 18
-    max_w = R - L - pad * 2
-    line_h = 26
-    lines = _wrap_text(draw, text, fonts.body, max_w, max_lines=20)
-    card_h = pad * 2 + len(lines) * line_h
-    card_h = min(card_h, y_bot - y_top)
-
+    card_h = y_bot - y_top
     draw.rounded_rectangle(
         (L, y_top, R, y_top + card_h),
         radius=12, fill=BG_CARD, outline=BORDER_SOFT, width=1,
     )
-    y = y_top + pad
-    for line in lines:
-        if y + line_h > y_top + card_h - pad + 4:
-            break
-        draw.text((L + pad, y), line, fill=FG, font=fonts.body)
-        y += line_h
+    _md_draw(
+        draw, text,
+        L + pad, R - pad,
+        y_top + pad, y_top + card_h - pad,
+        fonts, body_fill=FG,
+    )
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -761,7 +779,278 @@ def _blend(fg: tuple[int, int, int], bg: tuple[int, int, int], alpha: float) -> 
     return tuple(int(fg[i] * a + bg[i] * (1 - a)) for i in range(3))  # type: ignore[return-value]
 
 
-def _load_font(size: int, bold: bool = False, mono: bool = False):
+# ── Markdown / simple-HTML inline rendering ──────────────────────────────────
+# Lets the agent ship `**bold**`, `*italic*`, `# headings`, `- bullets`, and a
+# small set of HTML tags (<b>/<i>/<code>/<br>/<p>/<h1-3>/<ul>/<ol>/<li>) inside
+# any text-style visual.
+
+
+def _md_html_to_md(text: str) -> str:
+    text = re.sub(r'(?i)<br\s*/?>', '\n', text)
+    text = re.sub(r'(?i)<p[^>]*>', '\n\n', text)
+    text = re.sub(r'(?i)</p>', '', text)
+    text = re.sub(r'(?i)<h1[^>]*>(.*?)</h1>', r'# \1', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<h2[^>]*>(.*?)</h2>', r'## \1', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<h3[^>]*>(.*?)</h3>', r'### \1', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<(?:b|strong)[^>]*>(.*?)</(?:b|strong)>', r'**\1**', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<(?:i|em)[^>]*>(.*?)</(?:i|em)>', r'*\1*', text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<(?:code|tt)[^>]*>(.*?)</(?:code|tt)>', r'`\1`', text, flags=re.DOTALL)
+
+    def _replace_ol(m):
+        inner = m.group(1)
+        idx = [1]
+
+        def _li_num(li_match):
+            content = li_match.group(1)
+            res = f"\n{idx[0]}. {content}"
+            idx[0] += 1
+            return res
+
+        return re.sub(r'(?i)<li[^>]*>(.*?)</li>', _li_num, inner, flags=re.DOTALL)
+
+    text = re.sub(r'(?i)<ol[^>]*>(.*?)</ol>', _replace_ol, text, flags=re.DOTALL)
+
+    def _replace_ul(m):
+        inner = m.group(1)
+        return re.sub(r'(?i)<li[^>]*>(.*?)</li>', r'\n- \1', inner, flags=re.DOTALL)
+
+    text = re.sub(r'(?i)<ul[^>]*>(.*?)</ul>', _replace_ul, text, flags=re.DOTALL)
+    text = re.sub(r'(?i)<li[^>]*>', '\n- ', text)
+    text = re.sub(r'(?i)</li>', '', text)
+    text = re.sub(r'(?i)<[^>]+>', '', text)
+    return text
+
+
+def _md_parse_inline(text: str) -> list[tuple[str, str]]:
+    runs: list[tuple[str, str]] = []
+    i = 0
+    pattern = re.compile(r'(`[^`]*`)|(\*\*[^*]+\*\*)|(\*[^*\s][^*]*\*)|(_[^_\s][^_]*_)')
+    while i < len(text):
+        m = pattern.search(text, i)
+        if not m:
+            runs.append((text[i:], "normal"))
+            break
+        if m.start() > i:
+            runs.append((text[i:m.start()], "normal"))
+        token = m.group(0)
+        if token.startswith('`'):
+            runs.append((token[1:-1], "mono"))
+        elif token.startswith('**'):
+            runs.append((token[2:-2], "bold"))
+        else:
+            start, end = m.start(), m.end()
+            before = text[start - 1] if start > 0 else ''
+            after = text[end] if end < len(text) else ''
+            if (not before.isalnum()) and (not after.isalnum()):
+                runs.append((token[1:-1], "italic"))
+            else:
+                runs.append((token, "normal"))
+        i = m.end()
+    merged: list[tuple[str, str]] = []
+    for txt, st in runs:
+        if not txt:
+            continue
+        if merged and merged[-1][1] == st:
+            merged[-1] = (merged[-1][0] + txt, st)
+        else:
+            merged.append((txt, st))
+    return merged
+
+
+def _md_parse_blocks(text: str) -> list[dict]:
+    md = _md_html_to_md(text or "")
+    lines = md.splitlines()
+    blocks: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
+        hm = re.match(r'^(#{1,3})\s+(.*)', line)
+        if hm:
+            blocks.append({
+                "kind": "heading",
+                "level": len(hm.group(1)),
+                "runs": _md_parse_inline(hm.group(2)),
+            })
+            i += 1
+            continue
+        if re.match(r'^[-*•]\s+', line):
+            content = re.sub(r'^[-*•]\s+', '', line)
+            blocks.append({
+                "kind": "list_item",
+                "ordered": False,
+                "n": None,
+                "runs": _md_parse_inline(content),
+            })
+            i += 1
+            continue
+        om = re.match(r'^(\d+)\.\s+(.*)', line)
+        if om:
+            blocks.append({
+                "kind": "list_item",
+                "ordered": True,
+                "n": int(om.group(1)),
+                "runs": _md_parse_inline(om.group(2)),
+            })
+            i += 1
+            continue
+        para_parts: list[str] = []
+        while i < len(lines):
+            cur = lines[i].strip()
+            if not cur:
+                break
+            if (re.match(r'^(#{1,3})\s+', cur)
+                    or re.match(r'^[-*•]\s+', cur)
+                    or re.match(r'^(\d+)\.\s+', cur)):
+                break
+            para_parts.append(cur)
+            i += 1
+        blocks.append({
+            "kind": "paragraph",
+            "runs": _md_parse_inline(" ".join(para_parts)),
+        })
+    return blocks
+
+
+def _md_font_for(fonts, style: str, base: str = "body"):
+    if base == "h1":
+        return fonts.h1
+    if base == "h2":
+        return fonts.h2
+    if base == "h3":
+        return fonts.body_b
+    if style == "bold":
+        return fonts.body_b
+    if style == "italic":
+        return getattr(fonts, "italic", None) or fonts.body
+    if style == "mono":
+        return fonts.mono
+    return fonts.body
+
+
+def _md_draw_runs(draw, runs, x: int, y: int, max_w: int, fonts,
+                  base: str = "body", fill=None, line_h: int = 22,
+                  max_lines: int = 999) -> int:
+    if fill is None:
+        fill = FG_BODY
+    cur_y = y
+    line_num = 0
+    line_tokens: list[tuple[str, str]] = []
+    line_width = 0
+    done = False
+
+    def flush_line():
+        nonlocal cur_y, line_num, line_tokens, line_width, done
+        if done or not line_tokens:
+            return
+        is_last = (line_num + 1 >= max_lines)
+        if is_last:
+            ell_font = _md_font_for(fonts, "normal", base)
+            ell_w = _text_w(draw, "…", ell_font)
+            while line_tokens and line_width + ell_w > max_w:
+                txt, st = line_tokens.pop()
+                line_width -= _text_w(draw, txt, _md_font_for(fonts, st, base))
+            cx = x
+            for txt, st in line_tokens:
+                f = _md_font_for(fonts, st, base)
+                draw.text((cx, cur_y), txt, font=f, fill=fill)
+                cx += _text_w(draw, txt, f)
+            draw.text((cx, cur_y), "…", font=ell_font, fill=fill)
+            cur_y += line_h
+            line_num += 1
+            line_tokens.clear()
+            line_width = 0
+            done = True
+            return
+        cx = x
+        for txt, st in line_tokens:
+            f = _md_font_for(fonts, st, base)
+            draw.text((cx, cur_y), txt, font=f, fill=fill)
+            cx += _text_w(draw, txt, f)
+        cur_y += line_h
+        line_num += 1
+        line_tokens.clear()
+        line_width = 0
+
+    for txt, st in runs:
+        if done:
+            break
+        for token in re.findall(r'\S+|\s+', txt):
+            if done:
+                break
+            font = _md_font_for(fonts, st, base)
+            tw = _text_w(draw, token, font)
+            if token.isspace():
+                if not line_tokens:
+                    continue
+                if line_width + tw > max_w:
+                    flush_line()
+                    continue
+                line_tokens.append((token, st))
+                line_width += tw
+                continue
+            if line_width + tw > max_w:
+                if tw > max_w:
+                    if line_tokens:
+                        flush_line()
+                        if done:
+                            break
+                    truncated = _truncate_to_width(draw, token, font, max_w)
+                    draw.text((x, cur_y), truncated, font=font, fill=fill)
+                    cur_y += line_h
+                    line_num += 1
+                    if line_num >= max_lines:
+                        done = True
+                    continue
+                flush_line()
+                if done:
+                    break
+            line_tokens.append((token, st))
+            line_width += tw
+    flush_line()
+    return cur_y
+
+
+def _md_draw(draw, text: str, L: int, R: int, y_top: int, y_bot: int, fonts,
+             body_fill=None) -> int:
+    if body_fill is None:
+        body_fill = FG_BODY
+    y = y_top
+    for blk in _md_parse_blocks(text or ""):
+        if y >= y_bot - 10:
+            break
+        kind = blk["kind"]
+        avail_lines = max(1, (y_bot - y) // 22)
+        if kind == "heading":
+            level = blk["level"]
+            base = {1: "h1", 2: "h2", 3: "h3"}[level]
+            line_h = {1: 30, 2: 24, 3: 22}[level]
+            pad = {1: 6, 2: 5, 3: 4}[level]
+            y = _md_draw_runs(draw, blk["runs"], L, y, R - L, fonts,
+                              base=base, fill=FG, line_h=line_h, max_lines=avail_lines)
+            y += pad
+        elif kind == "paragraph":
+            y = _md_draw_runs(draw, blk["runs"], L, y, R - L, fonts,
+                              base="body", fill=body_fill, line_h=22, max_lines=avail_lines)
+            y += 6
+        elif kind == "list_item":
+            bullet_font = fonts.body_b
+            if blk["ordered"]:
+                btxt = f"{blk['n']}."
+                bw = _text_w(draw, btxt, bullet_font)
+                draw.text((L + max(0, 18 - bw), y), btxt, font=bullet_font, fill=MUTED)
+            else:
+                draw.text((L + 4, y - 2), "•", font=bullet_font, fill=ACCENT)
+            text_x = L + 22
+            y = _md_draw_runs(draw, blk["runs"], text_x, y, R - text_x, fonts,
+                              base="body", fill=body_fill, line_h=22, max_lines=avail_lines)
+            y += 2
+    return y
+
+
+def _load_font(size: int, bold: bool = False, mono: bool = False, italic: bool = False):
     from PIL import ImageFont
 
     candidates: list[str]
@@ -770,6 +1059,18 @@ def _load_font(size: int, bold: bool = False, mono: bool = False):
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+        ]
+    elif italic and bold:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ]
+    elif italic:
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         ]
     elif bold:
         candidates = [
