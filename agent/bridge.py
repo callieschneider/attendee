@@ -51,10 +51,11 @@ async def _resolve_bot_id(session_id_or_bot_id: str) -> str | None:
         try:
             from bots.models import Bot
 
-            # Preferred: look up via metadata.bridge_session_id
-            bot = Bot.objects.filter(
-                metadata__bridge_session_id=session_id_or_bot_id
-            ).first()
+            # Look up via metadata.bridge_session_id OR metadata.session_id
+            bot = (
+                Bot.objects.filter(metadata__bridge_session_id=session_id_or_bot_id).first()
+                or Bot.objects.filter(metadata__session_id=session_id_or_bot_id).first()
+            )
             if bot:
                 return bot.object_id
             # Legacy fallback: incoming path segment IS the bot_id
