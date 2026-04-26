@@ -33,8 +33,15 @@ def _budget_for_task(task: str) -> int:
     if task == "voice_briefing":
         return int(getattr(settings, "AGENT_VOICE_BRIEFING_TOKEN_BUDGET", 350))
     if task == "initial_voice_setup":
-        return int(getattr(settings, "AGENT_VOICE_SETUP_TOKEN_BUDGET", 4000))
-    return int(getattr(settings, "AGENT_SEMANTIC_TOKEN_BUDGET", 10500))
+        # Bumped from 4k → 24k so a session resume after Gemini Live's ~10-min
+        # cap can carry the full in-progress meeting transcript. Gemini 2.5
+        # Flash supports a 1M context — 24k is conservative and keeps cost
+        # predictable while spanning a typical meeting.
+        return int(getattr(settings, "AGENT_VOICE_SETUP_TOKEN_BUDGET", 24000))
+    # live_turn — Haiku 4.5 has a 200k context window, but typical turns only
+    # need recent conversation. Bumped from 10.5k → 24k so the agent can
+    # actually answer "what did we discuss earlier?" mid-meeting.
+    return int(getattr(settings, "AGENT_SEMANTIC_TOKEN_BUDGET", 24000))
 
 
 def build_context(
@@ -73,7 +80,10 @@ def build_context(
     artifacts = layers.get_relevant_artifacts(query, series_id, limit=5)
     current_occ = layers.get_current_occurrence(occurrence_id)
     action_log = layers.get_recent_action_log(bot_id, limit=20) if bot_id else []
-    transcript = layers.get_recent_transcript(bot_id, last_n_events=60) if bot_id else []
+    # Pull a wide transcript window so the agent has memory across the whole
+    # meeting. format_transcript + truncate_text_to_budget will trim if the
+    # token budget overflows. 500 events ≈ 60-90 min of typical conversation.
+    transcript = layers.get_recent_transcript(bot_id, last_n_events=500) if bot_id else []
 
     # Dedup artifacts vs. pinned vs. recent meetings by content similarity
     artifacts = deduplicate_items(
@@ -110,13 +120,17 @@ def build_context(
     sections.append(formatter.format_pinned(pinned))
     if task == "live_turn":
         sections.append(formatter.format_current_occurrence(current_occ))
-        sections.append(formatter.format_transcript(transcript, max_events=40))
+        # Show as much conversation history as we have — truncate_text_to_budget
+        # will trim from the bottom if we overflow. Spanning the full meeting
+        # is the goal; 300 events covers typical 1h calls.
+        sections.append(formatter.format_transcript(transcript, max_events=300))
         sections.append(formatter.format_action_log(action_log))
     else:  # initial_voice_setup
         sections.append(formatter.format_current_occurrence(current_occ))
-        # Include recent transcript so a session resume after Gemini Live's
-        # ~10-min cap doesn't lose memory of the in-progress conversation.
-        sections.append(formatter.format_transcript(transcript, max_events=20))
+        # Re-injecting the full transcript on every Gemini Live (re)open is
+        # what gives the agent memory across the ~10-min Live session cap.
+        # Without this, every session resume forgets everything said earlier.
+        sections.append(formatter.format_transcript(transcript, max_events=300))
         sections.append(formatter.format_action_log(action_log))
     sections.append(formatter.format_recent_meetings(recent_meetings))
     sections.append(formatter.format_open_tasks(open_tasks))
@@ -126,7 +140,22 @@ def build_context(
 
     # Budget enforcement
     budget = _budget_for_task(task)
+    pre_truncate_tokens = count_tokens(prompt)
     prompt = truncate_text_to_budget(prompt, budget)
+    post_truncate_tokens = count_tokens(prompt)
+
+    # region agent log
+    try:
+        import logging as _logging
+        _log = _logging.getLogger("agent.context_engine")
+        _log.warning(
+            "DBG68285d F context bot=%s task=%s transcript_events=%d budget=%d pre_tokens=%d post_tokens=%d truncated=%s",
+            bot_id, task, len(transcript), budget, pre_truncate_tokens, post_truncate_tokens,
+            pre_truncate_tokens > post_truncate_tokens,
+        )
+    except Exception:
+        pass
+    # endregion
 
     return {
         "prompt_markdown": prompt,
