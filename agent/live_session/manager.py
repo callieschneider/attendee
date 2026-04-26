@@ -65,6 +65,11 @@ _LIVE_READ_ONLY_TOOLS = frozenset({
     "read_recent_chat",
     "web_search",
     "fetch_url",
+    # Voice state flips. Cheap, idempotent, must run with sub-second
+    # latency. Live calls them directly; do NOT defer to the Turn
+    # Processor (would add a ~1s round-trip to "shut up").
+    "voice_sleep",
+    "voice_wake",
 })
 
 # Friendly note returned to Live when it tries to call a write tool.

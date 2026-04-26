@@ -37,6 +37,13 @@ _LIVE_VISIBLE_TOOL_NAMES = {
     "read_recent_chat",
     "web_search",
     "fetch_url",
+    # Voice state — Live calls these directly when the user signals
+    # sleep/wake intent. Not "writes" in the Turn-Processor sense; they
+    # only flip an in-memory/Redis flag and are required for sub-second
+    # responsiveness. Kept symmetric with `_LIVE_READ_ONLY_TOOLS` in
+    # `agent/live_session/manager.py`.
+    "voice_sleep",
+    "voice_wake",
 }
 
 

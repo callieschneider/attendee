@@ -183,9 +183,11 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
         log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
-    # Sleep / wake phrase detection — runs BEFORE gate ops so a "go to
-    # sleep" right after a "Clever Star" doesn't immediately reopen.
-    voice_state_changed = _maybe_handle_voice_state_phrases(bot_id, text)
+    # Voice-state intent (sleep / wake) is decided by the LLMs via the
+    # `voice_sleep` / `voice_wake` tools — Gemini Live calls them when it
+    # hears the user, and the Turn Processor calls them based on webhook
+    # transcripts (the only path that still reaches us while voice is
+    # suspended and the gate is closed).
 
     # Any speech event extends the audio gate if it's already open —
     # this is how conversations feel natural (user doesn't have to re-trigger
@@ -196,8 +198,7 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     # Direct-address detection → open the audio gate AND replay the trigger
     # utterance to Live as text so it can answer the FIRST utterance (no
     # "say my name twice" lag).
-    if not voice_state_changed:
-        _maybe_open_gate_on_address(bot_id, text, speaker=speaker)
+    _maybe_open_gate_on_address(bot_id, text, speaker=speaker)
 
     # Fire-and-forget schedule. Gemini Live handles live conversation
     # natively when the gate is open (low latency, no round-trip through
@@ -370,74 +371,6 @@ def _maybe_open_gate_on_address(bot_id: str, text: str, speaker: str = "") -> bo
             return True
     except Exception:
         log.exception("_maybe_open_gate_on_address: classifier failed bot=%s", bot_id)
-    return False
-
-
-# Sleep / wake phrase patterns. Kept narrow + word-boundary anchored to
-# avoid false positives like "let me sleep on it" or "wake me up at noon".
-import re as _re
-
-_SLEEP_PATTERNS = [
-    _re.compile(
-        r"\b(?:go to sleep|go silent|stand by|be quiet|stop listening|"
-        r"mute yourself|hush|pause for now)\b",
-        _re.IGNORECASE,
-    ),
-    # "that's enough" / "that is enough" / "that's enough for now"
-    _re.compile(r"\bthat(?:'s| is| s)?\s+enough\b", _re.IGNORECASE),
-    # "<name>, sleep / silence / stop / enough / be quiet / that's enough"
-    _re.compile(
-        r"\b(?:clever\s*star|cleverstar)\s*[, ]+\s*(?:"
-        r"go to sleep|sleep|silence|stop|stand by|"
-        r"that(?:'s| is| s)?\s+enough|enough(?:\s+for\s+now)?|be quiet"
-        r")\b",
-        _re.IGNORECASE,
-    ),
-]
-_WAKE_PATTERNS = [
-    _re.compile(
-        r"\b(?:wake up|are you there|come back|you can talk|listen up|resume listening)\b",
-        _re.IGNORECASE,
-    ),
-    _re.compile(
-        r"\b(?:clever\s*star|cleverstar)\s*[, ]+\s*(?:wake up|are you there|listen|come back)\b",
-        _re.IGNORECASE,
-    ),
-]
-
-
-def _maybe_handle_voice_state_phrases(bot_id: str, text: str) -> bool:
-    """
-    Detect "go to sleep" / "wake up" style phrases and toggle voice state.
-    Returns True iff a state change was applied.
-    """
-    if not text:
-        return False
-    for pat in _SLEEP_PATTERNS:
-        if pat.search(text):
-            try:
-                from agent.live_session.signals import publish_gate_close, set_voice_suspended
-                set_voice_suspended(bot_id, True)
-                publish_gate_close(bot_id, reason="sleep_phrase")
-                _kick_canvas_safely(bot_id)
-                log.info("voice: SLEEP triggered bot=%s text=%r", bot_id, text[:80])
-            except Exception:
-                log.exception("voice: sleep dispatch failed bot=%s", bot_id)
-            return True
-    for pat in _WAKE_PATTERNS:
-        if pat.search(text):
-            try:
-                from agent.live_session.signals import publish_gate_open, set_voice_suspended
-
-                set_voice_suspended(bot_id, False)
-                publish_gate_open(bot_id, reason="wake_phrase", ttl_seconds=600)
-                from agent.live_session.signals import publish_voice_context
-                publish_voice_context(bot_id, f"User just said: {text}")
-                _kick_canvas_safely(bot_id)
-                log.info("voice: WAKE triggered bot=%s text=%r", bot_id, text[:80])
-            except Exception:
-                log.exception("voice: wake dispatch failed bot=%s", bot_id)
-            return True
     return False
 
 
