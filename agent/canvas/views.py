@@ -87,13 +87,29 @@ def _snapshot_state(bot_id: str) -> dict:
     every SSE tick (~1s).
     """
     from agent.models import ActionLogEntry, MeetingCursor, TranscriptEvent
+    from django.db.models import Q
 
     cursor = MeetingCursor.objects.filter(bot_id=bot_id).first()
     events = list(
         TranscriptEvent.objects.filter(bot_id=bot_id)
+        # Attendee webhook is the canonical transcript source. Live STT rows
+        # (raw.source="gemini_live") are kept in the table for debugging but
+        # excluded from canvas display — otherwise every utterance is shown
+        # twice with different speaker labels ("User"+"Callie Schneider",
+        # "Clever Star"+"Meeting Agent").
+        .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
         .order_by("-event_time")[:25]
     )
     events.reverse()
+    # region agent log
+    try:
+        _live_count = sum(1 for e in events if (e.raw or {}).get("source") == "gemini_live")
+        _self_count = sum(1 for e in events if (e.raw or {}).get("self_utterance"))
+        log.warning("DBG68285d E snapshot bot=%s events=%d live_after_filter=%d self_count=%d",
+            bot_id, len(events), _live_count, _self_count)
+    except Exception:
+        pass
+    # endregion
     actions = list(
         ActionLogEntry.objects.filter(bot_id=bot_id)
         .order_by("-created_at")[:15]
@@ -108,6 +124,17 @@ def _snapshot_state(bot_id: str) -> dict:
 
     voice_state = _voice_state(bot_id, cursor)
 
+    # The bot's Workspace SSO display name ("Meeting Agent") does not match
+    # the configured agent persona ("Clever Star"). Map self-utterance speakers
+    # to the configured AGENT_NAME so the canvas shows one consistent label.
+    bot_display_name = _bot_display_name(bot_id)
+
+    def _display_speaker(e) -> str:
+        raw = e.raw or {}
+        if raw.get("self_utterance"):
+            return bot_display_name
+        return e.speaker or ""
+
     return {
         "bot_id": bot_id,
         "now": timezone.now().isoformat(),
@@ -117,7 +144,7 @@ def _snapshot_state(bot_id: str) -> dict:
             {
                 "t": e.event_time.isoformat() if e.event_time else None,
                 "kind": e.kind,
-                "speaker": e.speaker,
+                "speaker": _display_speaker(e),
                 "text": (e.text or "")[:280],
             }
             for e in events
@@ -135,6 +162,30 @@ def _snapshot_state(bot_id: str) -> dict:
         "thinking": thinking,
         "visual": visual,
     }
+
+
+def _bot_display_name(bot_id: str) -> str:
+    """Configured agent persona name (e.g. AGENT_NAME='Clever Star').
+
+    Falls back to the Bot.name and finally to "Agent". Used to relabel
+    self-utterances on the canvas — the SSO Workspace name surfaced by
+    Attendee ("Meeting Agent") does not match the persona we want shown.
+    """
+    try:
+        from django.conf import settings
+        name = (getattr(settings, "AGENT_NAME", "") or "").strip()
+        if name:
+            return name
+    except Exception:
+        pass
+    try:
+        from bots.models import Bot
+        bot = Bot.objects.filter(object_id=bot_id).only("name").first()
+        if bot and bot.name:
+            return bot.name
+    except Exception:
+        pass
+    return "Agent"
 
 
 def _voice_state(bot_id: str, cursor) -> dict:
@@ -197,6 +248,10 @@ def _latest_visual_for_bot(bot_id: str) -> dict | None:
         if series_id:
             qs = qs.filter(series_id=series_id)
         art = qs.order_by("-updated_at").first()
+        # region agent log
+        log.warning("DBG68285d DE visual_lookup bot=%s occ=%s series=%s art=%s",
+            bot_id, occ is not None, series_id, art.id if art else None)
+        # endregion
         if not art:
             return None
         spec = None
