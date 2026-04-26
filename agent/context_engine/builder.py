@@ -173,23 +173,34 @@ def _voice_briefing(
         tail_text = " / ".join(f"{ev.get('speaker', '?')}: {(ev.get('text') or '')[:120]}" for ev in tail)
         parts.append(f"Last heard — {tail_text}.")
 
-    parts.append("Stay silent unless directly addressed.")
     return " ".join(parts)
 
 
 def _describe_action(entry: dict) -> str:
     tool = entry.get("tool_name", "")
     inp = entry.get("tool_input") or {}
+    res = entry.get("tool_result") or {}
     if tool == "create_task":
         return f"captured task '{inp.get('title', '?')}'"
     if tool == "create_artifact":
         return f"saved artifact '{inp.get('title', '?')}'"
+    if tool == "create_visual":
+        title = inp.get("title") or (res.get("title") if isinstance(res, dict) else "")
+        return f"put a visual on the bot tile: '{title or 'untitled'}'"
+    if tool == "update_visual":
+        return "updated the visual on the bot tile"
+    if tool == "update_task_status":
+        return f"set task {inp.get('task_id', '?')[:8]} to {inp.get('status', '?')}"
     if tool == "promote_meeting_task":
         return "promoted an action item"
     if tool == "send_email_summary":
         return "sent the email summary"
+    if tool == "save_artifact_from_url":
+        return f"saved a link: {inp.get('url', '')[:80]}"
     if tool == "send_chat_message":
         return f"posted in chat: \"{(inp.get('text') or '')[:60]}\""
     if tool == "speak_via_voice":
         return f"said \"{(inp.get('text') or '')[:60]}\""
+    if tool == "call_model":
+        return f"asked {inp.get('model', '?')} for help"
     return f"ran {tool}"

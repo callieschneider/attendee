@@ -1,9 +1,9 @@
 """
-Visual tools — stubs for Phase 5 that write visual specs into an Artifact row
-with type=chart. Phase 6 will add the Playwright-based renderer + live canvas.
-
-For now, `create_visual` returns an artifact_id so the LLM has something to
-reference later; `update_visual` replaces the JSON spec.
+Visual tools — write a visual spec into an Artifact row with type=chart.
+The canvas pump (Celery beat task `agent.canvas.pump.push_canvas_images`,
+running every ~1s) renders these to PNG and POSTs them to Attendee. We
+also kick a synchronous one-shot pump on the worker so the new visual
+appears within ~50ms instead of waiting for the next tick.
 """
 from __future__ import annotations
 
@@ -50,55 +50,28 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
         log.exception("create_visual: failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
 
-    # Pre-render HTML specs immediately so the canvas updates right away
-    # (instead of waiting for the 3s pump cycle to re-render).
-    if spec.get("type") == "html" and spec.get("html"):
-        _render_html_and_push(artifact, ctx.get("bot_id"))
+    _kick_canvas_pump(ctx.get("bot_id"))
 
     return {
         "success": True,
         "visual_id": str(artifact.id),
-        "rendered": True,
-        "message": "Done. Visual is up.",
+        "title": title,
+        "message": "Visual queued — appears on the bot's tile within ~1 second.",
     }
 
 
-def _render_html_and_push(artifact, bot_id: str | None) -> None:
-    """
-    Immediately render an HTML spec artifact to PNG and push it to the
-    bot's video feed. Best-effort — never raises.
-    """
+def _kick_canvas_pump(bot_id: str | None) -> None:
+    """Trigger an immediate one-shot canvas render+push for this bot.
+    Best-effort — never raises. The Celery beat pump runs every ~1s anyway,
+    this just shaves the worst-case wait."""
     if not bot_id:
         return
     try:
-        import base64
-        import requests
-        from django.conf import settings
-        from agent.canvas.html_renderer import render_html_to_png
-        import json
+        from agent.canvas.pump import push_canvas_images_for_bot
 
-        spec = json.loads(artifact.content or "{}")
-        html = spec.get("html", "")
-        if not html:
-            return
-
-        png = render_html_to_png(html)
-        if not png:
-            log.warning("_render_html_and_push: renderer returned None bot=%s", bot_id)
-            return
-
-        api_key = getattr(settings, "ATTENDEE_API_KEY", "")
-        api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
-        resp = requests.post(
-            f"{api_base}/api/v1/bots/{bot_id}/output_image",
-            headers={"Authorization": f"Token {api_key}", "Content-Type": "application/json"},
-            json={"type": "image/png", "data": base64.b64encode(png).decode()},
-            timeout=10,
-        )
-        if resp.status_code >= 400:
-            log.warning("_render_html_and_push: HTTP %s bot=%s", resp.status_code, bot_id)
+        push_canvas_images_for_bot(bot_id)
     except Exception:
-        log.exception("_render_html_and_push: failed bot=%s", bot_id)
+        log.exception("_kick_canvas_pump: failed bot=%s", bot_id)
 
 
 def _update_visual(inp: dict, ctx: dict) -> dict:
@@ -142,26 +115,30 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
         artifact.title = inp["title"][:255]
     artifact.save(update_fields=["content", "title", "updated_at"])
 
-    # Immediately push HTML renders
-    if spec.get("type") == "html" and spec.get("html"):
-        _render_html_and_push(artifact, ctx.get("bot_id"))
+    _kick_canvas_pump(ctx.get("bot_id"))
 
     return {
         "success": True,
         "updated": True,
         "visual_id": str(artifact.id),
-        "message": "Done. Visual updated.",
+        "message": "Visual updated — re-renders within ~1 second.",
     }
 
 
 _SPEC_DESCRIPTION = (
-    "JSON spec describing what to render on the bot's canvas video tile. "
-    "Supported types:\n"
-    "  - {\"type\":\"bar\", \"data\":[{\"label\":\"Q1\",\"value\":120}, …]} — bar/column chart\n"
-    "  - {\"type\":\"list\", \"items\":[\"foo\",\"bar\", …]} — bullet list\n"
-    "  - {\"type\":\"table\", \"rows\":[[\"Name\",\"Status\"],[\"Foo\",\"OK\"], …]} — first row is header\n"
-    "  - {\"type\":\"text\", \"text\":\"…\"} — plain text card\n"
-    "Pick the simplest type that fits. Keep data small (≤12 items)."
+    "JSON spec describing what to render on the bot's video tile. Choose ONE shape:\n"
+    '  - {"type":"html","html":"<!DOCTYPE html><html>...</html>","title":"..."}\n'
+    "      Full self-contained HTML page. Inline CSS+SVG only, no external resources.\n"
+    "      Theme: dark bg #0a0b0f, light text #e5e7eb, accent #a5b4fc.\n"
+    '      Use this for anything richer than a flat list — preferred for "show me X" requests.\n'
+    "      RECOMMENDED FLOW: call `call_model` (anthropic/claude-haiku-4.5 or sonnet-4.5) to\n"
+    "      generate the HTML first, then pass the HTML string here. Do NOT try to compose\n"
+    "      hundreds of lines of HTML inside this argument yourself.\n"
+    '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}        — server-rendered bar chart\n'
+    '  - {"type":"list","items":["foo","bar", ...]}                     — server-rendered bullet list\n'
+    '  - {"type":"table","rows":[["Name","Status"],["Foo","OK"], ...]}  — first row is header\n'
+    '  - {"type":"text","text":"..."}                                   — plain text card\n'
+    "Keep data small (≤12 items). Always include a `type` field."
 )
 
 
@@ -169,10 +146,11 @@ TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_visual",
         description=(
-            "Render a chart, list, table, or text card on the bot's video "
-            "tile in the meeting (the canvas updates within ~3 seconds). "
-            "Use this any time the user asks to 'show', 'display', 'put up', "
-            "'draw', 'visualize', or anything similar."
+            "Render a visual on the bot's video tile in the meeting. The canvas "
+            "updates within ~1 second. Use this any time the user asks to 'show', "
+            "'display', 'put up', 'draw', 'visualize', or anything similar. For "
+            "rich layouts, first call `call_model` to generate the HTML, then pass "
+            "it via spec={'type':'html','html':<HTML>,'title':<title>}."
         ),
         input_schema=ToolSchema(
             type="object",
@@ -186,12 +164,19 @@ TOOLS: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="update_visual",
-        description="Replace the spec of an existing visual by ID. Same shape as create_visual.spec.",
+        description=(
+            "Replace the spec of an existing visual by ID. Same shape as create_visual.spec. "
+            "If the ID is wrong, falls back to updating the most recent visual for this bot."
+        ),
         input_schema=ToolSchema(
             type="object",
             properties={
-                "visual_id": {"type": "string", "description": "Visual artifact UUID returned by create_visual."},
+                "visual_id": {
+                    "type": "string",
+                    "description": "Visual artifact UUID returned by create_visual.",
+                },
                 "spec": {"type": "object", "description": _SPEC_DESCRIPTION},
+                "title": {"type": "string", "description": "Optional updated title."},
             },
             required=["visual_id", "spec"],
         ),

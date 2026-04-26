@@ -15,41 +15,41 @@ log = logging.getLogger("agent.gemini_live")
 AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
 
 
-_LIVE_READ_ONLY_TOOL_NAMES = {
+# Tools that Gemini Live is allowed to call DIRECTLY. Everything else flows
+# through the Turn Processor (Claude Haiku 4.5) on the worker side via the
+# multi-round agent loop. This keeps Live focused on conversation + fast
+# read-only lookups, and prevents races/duplicate writes between Live and
+# the Turn Processor on the same transcript chunk.
+#
+# MUST stay in sync with `_LIVE_READ_ONLY_TOOLS` in
+# `agent/live_session/manager.py` (the runtime gate).
+_LIVE_VISIBLE_TOOL_NAMES = {
+    "list_tasks",
+    "list_series",
+    "list_upcoming_meetings",
     "get_recent_occurrences",
     "get_occurrence_transcript",
     "get_meeting_notes",
-    "list_upcoming_meetings",
     "get_series_context_bundle",
-    "list_series",
-    "list_tasks",
     "search_artifacts",
     "get_artifact",
     "semantic_search",
+    "read_recent_chat",
     "web_search",
     "fetch_url",
-    "read_recent_chat",
-    # Visual tools — write-mutating but user-facing and idempotent.
-    # The canvas pump picks up the new spec on its next tick (~3s).
-    "create_visual",
-    "update_visual",
 }
-
-
-# Tools NOT exposed to Gemini Live. speak_via_voice would create a recursive
-# loop (Gemini Live calling a tool that asks itself to speak). Gemini Live
-# speaks directly via its native audio output.
-_HIDDEN_FROM_LIVE = {"speak_via_voice"}
 
 
 def _gather_tool_schemas_for_gemini_live() -> list[dict]:
     """
-    Expose tools to Gemini Live with BLOCKING behavior — same pattern
-    as abstrakt's working Gemini Live setup.
+    Expose ONLY read-only tools to Gemini Live. Same BLOCKING behavior
+    pattern as abstrakt's working setup. Everything else (writes, visuals,
+    call_model, voice/chat replies) is handled by the Turn Processor agent
+    loop running on the worker.
     """
     decls = []
     for t in TOOL_REGISTRY.values():
-        if t.name in _HIDDEN_FROM_LIVE:
+        if t.name not in _LIVE_VISIBLE_TOOL_NAMES:
             continue
         d = to_gemini_declaration(t)
         d["behavior"] = "BLOCKING"
@@ -73,7 +73,7 @@ def build_live_setup(
     - Input + output transcriptions for observability
     - Session resumption for the ~10-min cap
     """
-    model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-09-2025")
+    model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
     thinking_level = getattr(settings, "AGENT_LIVE_THINKING_LEVEL", "HIGH").upper()
 
     tool_declarations = _gather_tool_schemas_for_gemini_live()

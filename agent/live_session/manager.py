@@ -40,14 +40,41 @@ ATTENDEE_SAMPLE_RATE = 16000
 GEMINI_OUTPUT_RATE = 24000
 
 
-# Tools considered safe to execute DIRECTLY from Gemini Live's toolCall stream
-# (no race conditions with the Turn Processor). All other tools must go through
-# the Turn Processor where they're tracked in ActionLogEntry.
-# All tools are available to Gemini Live (abstrakt's pattern). The Turn
-# Processor still runs in parallel for background actions during longer
-# conversations; the small risk of a duplicate ActionLogEntry is worth
-# the simplicity of "just let Gemini call any tool."
-_LIVE_READ_ONLY_TOOLS = None  # None means "no restriction"
+# Tools Gemini Live is allowed to execute DIRECTLY from its toolCall stream.
+# Anything outside this set must go through the Turn Processor (Claude Haiku
+# 4.5) where it's tracked in ActionLogEntry and benefits from the multi-round
+# agent loop with tool-result feedback. Letting Live call write tools here
+# (create_task / create_visual / etc.) caused duplicate actions and races
+# with the Turn Processor on the same chunk.
+#
+# These read-only tools are safe because:
+#   - they don't mutate user state
+#   - they're cheap (<200ms typically)
+#   - the user wants them answered conversationally in real-time
+_LIVE_READ_ONLY_TOOLS = frozenset({
+    "list_tasks",
+    "list_series",
+    "list_upcoming_meetings",
+    "get_recent_occurrences",
+    "get_occurrence_transcript",
+    "get_meeting_notes",
+    "get_series_context_bundle",
+    "search_artifacts",
+    "get_artifact",
+    "semantic_search",
+    "read_recent_chat",
+    "web_search",
+    "fetch_url",
+})
+
+# Friendly note returned to Live when it tries to call a write tool.
+# The Turn Processor will pick up the same user utterance from the
+# transcript and execute the action there.
+_LIVE_WRITE_REJECTION_TEMPLATE = (
+    "Tool '{name}' is dispatched by the agent loop, not by the live voice "
+    "model. The action will be executed shortly — narrate that you're "
+    "working on it, don't retry."
+)
 
 
 class LiveSessionManager:
@@ -289,20 +316,23 @@ class LiveSessionManager:
             args = c.get("args", {}) or {}
             call_id = c.get("id", "")
             if _LIVE_READ_ONLY_TOOLS is not None and name not in _LIVE_READ_ONLY_TOOLS:
+                # Write tool — defer to the Turn Processor. Trigger an
+                # immediate turn so the action happens with low latency,
+                # then return a graceful note to Live so it can narrate.
+                rejection = _LIVE_WRITE_REJECTION_TEMPLATE.format(name=name)
                 responses.append(
                     {
                         "id": call_id,
                         "name": name,
-                        "response": {
-                            "error": f"Tool '{name}' is not allowed in this session."
-                        },
+                        "response": {"deferred": True, "message": rejection},
                     }
                 )
                 await self._log_action_create(
                     name, args,
-                    status="error",
-                    error_msg=f"rejected: {name} not in allowed list",
+                    status="deferred",
+                    error_msg=f"deferred to turn processor: {name}",
                 )
+                self._kick_turn_processor()
                 continue
 
             # Log "pending" IMMEDIATELY so the canvas shows the in-flight action.
@@ -363,6 +393,23 @@ class LiveSessionManager:
         except Exception:
             pass
 
+    def _kick_turn_processor(self) -> None:
+        """Nudge the Turn Processor (Celery) to run a turn for this bot
+        immediately, instead of waiting for the next scheduler tick.
+        Used when Gemini Live attempts a write tool that we deferred."""
+        try:
+            from agent.turn_processor import process_meeting_turn
+
+            asyncio.create_task(self._kick_turn_async(process_meeting_turn))
+        except Exception:
+            log.exception("_kick_turn_processor: failed bot=%s", self.bot_id)
+
+    async def _kick_turn_async(self, fn) -> None:
+        try:
+            await sync_to_async(lambda: fn.delay(self.bot_id, None, "voice"))()
+        except Exception:
+            log.exception("_kick_turn_async: enqueue failed bot=%s", self.bot_id)
+
     async def _push_canvas_async(self, fn) -> None:
         try:
             await sync_to_async(fn)(self.bot_id)
@@ -379,13 +426,20 @@ class LiveSessionManager:
     ) -> None:
         """
         Gemini Live emits transcript fragments via inputTranscription /
-        outputTranscription. Accumulate fragments and persist a single
-        TranscriptEvent per finalized utterance.
+        outputTranscription. Persist them as TranscriptEvent rows tagged
+        `raw.source = "gemini_live"` so the canvas can show the live
+        in-flight utterance (Attendee webhook transcripts arrive only on
+        utterance-finalize, which is too slow for "user is speaking now"
+        feedback).
+
+        IMPORTANT: the scheduler and turn_processor filter these rows OUT
+        (.exclude(raw__source="gemini_live")) so the agent loop never sees
+        them — Attendee's webhook events are the canonical source for the
+        brain. This is what prevents the "every utterance gets seen twice"
+        bug while keeping live canvas feedback.
         """
-        import uuid as _uuid
         from datetime import datetime as _dt, timezone as _tz
 
-        # Lazy-init per-key buffers on the instance
         buf = getattr(self, buf_key, None)
         if buf is None:
             buf = {"text": "", "started_at": None}
@@ -395,7 +449,6 @@ class LiveSessionManager:
             buf["started_at"] = _dt.now(_tz.utc)
         buf["text"] += text
 
-        # Always update DB with running text so canvas shows progress live
         @sync_to_async
         def _persist():
             try:
@@ -422,10 +475,7 @@ class LiveSessionManager:
             log.exception("_log_transcript: wrapper failed")
 
         if finished:
-            # Reset buffer so next utterance starts fresh
             setattr(self, buf_key, {"text": "", "started_at": None})
-            # Push a fresh canvas frame immediately so the transcript appears
-            # without waiting for the next 1s pump tick.
             self._push_canvas_now()
 
     async def _log_action_create(
