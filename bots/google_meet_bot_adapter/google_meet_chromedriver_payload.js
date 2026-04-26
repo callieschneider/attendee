@@ -2276,7 +2276,21 @@ async function turnOnCamera() {
     let cameraButton = null;
     const numAttempts = 30;
     for (let i = 0; i < numAttempts; i++) {
-        cameraButton = document.querySelector('button[aria-label="Turn on camera"]') || document.querySelector('div[aria-label="Turn on camera"]');
+        cameraButton = (
+            document.querySelector('button[aria-label="Turn on camera"]') ||
+            document.querySelector('div[aria-label="Turn on camera"]') ||
+            document.querySelector('button[aria-label="turn on camera"]') ||
+            document.querySelector('button[data-tooltip="Turn on camera"]') ||
+            document.querySelector('[data-promo-anchor-id="camera-button"][aria-pressed="false"]') ||
+            (() => {
+                // Fallback: find any camera-related button that is currently toggled off
+                const btns = Array.from(document.querySelectorAll('button[aria-pressed="false"]'));
+                return btns.find(b => {
+                    const lbl = (b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || b.title || '').toLowerCase();
+                    return lbl.includes('camera') || lbl.includes('video');
+                }) || null;
+            })()
+        );
         if (cameraButton) {
             break;
         }
@@ -2332,7 +2346,17 @@ function turnOnMicAndCamera() {
     }
 
     // Click camera button to turn it on
-    const cameraButton = document.querySelector('button[aria-label="Turn on camera"]');
+    const cameraButton = (
+        document.querySelector('button[aria-label="Turn on camera"]') ||
+        document.querySelector('button[data-tooltip="Turn on camera"]') ||
+        (() => {
+            const btns = Array.from(document.querySelectorAll('button[aria-pressed="false"]'));
+            return btns.find(b => {
+                const lbl = (b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || b.title || '').toLowerCase();
+                return lbl.includes('camera') || lbl.includes('video');
+            }) || null;
+        })()
+    );
     if (cameraButton) {
         console.log("Clicking the camera button to turn it on");
         cameraButton.click();
