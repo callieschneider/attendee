@@ -22,13 +22,16 @@ log = logging.getLogger("agent.live_session.signals")
 
 GATE_CHANNEL = "agent:live:gate"
 GATE_EXTEND_CHANNEL = "agent:live:gate_extend"
+GATE_CLOSE_CHANNEL = "agent:live:gate_close"
 SPEAK_CHANNEL = "agent:live:speak"
 VOICE_CONTEXT_CHANNEL = "agent:live:voice_ctx"
 
-# Redis key tracking gate state for cross-process coordination.
-# Set synchronously by the web process at gate-open time so the Turn Processor
-# can check it without waiting for DB replication from the bridge process.
+# Redis keys tracking voice state for cross-process coordination.
 GATE_STATE_KEY_FMT = "agent:gate:{bot_id}"
+# Sticky "user said sleep / quiet" flag. Persists across gate auto-closes.
+# Cleared explicitly when the user says a wake phrase, addresses the agent
+# by name, or when the meeting ends.
+VOICE_SUSPENDED_KEY_FMT = "agent:voice_suspended:{bot_id}"
 
 
 _REDIS_CLIENT = None
@@ -135,6 +138,43 @@ def publish_gate_open(bot_id: str, reason: str, ttl_seconds: int = 30) -> bool:
         GATE_CHANNEL,
         {"bot_id": bot_id, "reason": reason, "ttl_seconds": ttl_seconds},
     )
+
+
+def publish_gate_close(bot_id: str, reason: str = "explicit") -> bool:
+    """
+    Tell the bridge to close the audio gate immediately. Used by sleep
+    phrases ("go to sleep", "that's enough", "stand by", etc.).
+    """
+    clear_gate_state(bot_id)
+    return _publish(
+        GATE_CLOSE_CHANNEL,
+        {"bot_id": bot_id, "reason": reason},
+    )
+
+
+def set_voice_suspended(bot_id: str, suspended: bool) -> None:
+    """Sticky flag that survives gate auto-close. Sleep phrase sets True."""
+    r = _get_redis()
+    if r is None:
+        return
+    try:
+        key = VOICE_SUSPENDED_KEY_FMT.format(bot_id=bot_id)
+        if suspended:
+            r.set(key, "1", ex=86400)  # 24h cap; cleared on wake
+        else:
+            r.delete(key)
+    except Exception:
+        log.exception("set_voice_suspended: failed bot=%s", bot_id)
+
+
+def is_voice_suspended(bot_id: str) -> bool:
+    r = _get_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.get(VOICE_SUSPENDED_KEY_FMT.format(bot_id=bot_id)))
+    except Exception:
+        return False
 
 
 def publish_gate_extend(bot_id: str, ttl_seconds: int = 30) -> bool:

@@ -156,8 +156,38 @@ class LiveSessionManager:
             if "setupComplete" in msg:
                 log.info("live_session: setupComplete bot=%s", self.bot_id)
                 await self._persist_session_opened()
+                # AWAKE BY DEFAULT: open the audio gate immediately so the
+                # very first user utterance reaches Gemini Live. Without
+                # this the gate stays closed until a finalized webhook
+                # transcript triggers `is_addressed`, by which point the
+                # opening utterance's audio has already been dropped —
+                # producing the "have to say the name twice" UX bug.
+                # The gate stays open until a sleep phrase, an explicit
+                # close, or the long TTL elapses (the TTL is refreshed on
+                # every speech event by `publish_gate_extend`).
+                if not await self._is_voice_suspended():
+                    await self.gate.open(
+                        reason="session_default",
+                        ttl_seconds=int(getattr(settings, "AGENT_GATE_DEFAULT_TTL_SECONDS", 1800)),
+                    )
+                    try:
+                        from . import signals as _sig
+                        _sig._set_gate_state(
+                            self.bot_id, "session_default",
+                            int(getattr(settings, "AGENT_GATE_DEFAULT_TTL_SECONDS", 1800)),
+                        )
+                    except Exception:
+                        log.exception("live_session: redis gate state set failed bot=%s", self.bot_id)
                 return
         raise RuntimeError("Gemini WS closed before setupComplete")
+
+    async def _is_voice_suspended(self) -> bool:
+        """User explicitly said sleep/quiet — keep gate closed until they wake it."""
+        try:
+            from . import signals as _sig
+            return _sig.is_voice_suspended(self.bot_id)
+        except Exception:
+            return False
 
     async def _reopen_gemini_session(self, reason: str) -> None:
         log.info("live_session: reopening Gemini bot=%s reason=%s", self.bot_id, reason)
@@ -272,7 +302,10 @@ class LiveSessionManager:
                 # Mark "bot is currently speaking" — used by the audio pump to
                 # drop incoming mic audio for the duration of bot speech +
                 # a small echo-tail window. Each audio frame extends this.
-                self._bot_speaking_until = time.monotonic() + 0.6
+                # Trimmed to 0.3s to make user interruptions feel instant —
+                # 0.6s caused noticeable "I'm trying to butt in but it
+                # doesn't hear me" lag.
+                self._bot_speaking_until = time.monotonic() + 0.3
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:
@@ -605,6 +638,7 @@ class LiveSessionManager:
         channels = [
             signals.GATE_CHANNEL,
             signals.GATE_EXTEND_CHANNEL,
+            signals.GATE_CLOSE_CHANNEL,
             signals.SPEAK_CHANNEL,
             signals.VOICE_CONTEXT_CHANNEL,
         ]
@@ -619,10 +653,14 @@ class LiveSessionManager:
                         reason=payload.get("reason", "signal"),
                         ttl_seconds=int(payload.get("ttl_seconds", 30)),
                     )
+                    self._push_canvas_now()
                 elif channel == signals.GATE_EXTEND_CHANNEL:
                     await self.gate.extend_if_open(
                         ttl_seconds=int(payload.get("ttl_seconds", 30)),
                     )
+                elif channel == signals.GATE_CLOSE_CHANNEL:
+                    await self.gate.close(reason=payload.get("reason", "sleep"))
+                    self._push_canvas_now()
                 elif channel == signals.SPEAK_CHANNEL:
                     text = payload.get("text", "")
                     if text:

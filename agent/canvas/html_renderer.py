@@ -68,7 +68,11 @@ def render_html_to_png(html: str) -> bytes | None:
 
         try:
             driver.get(f"file://{tmp_path}")
-            time.sleep(0.3)  # let JS/CSS settle
+            # Inline-only HTML (no JS, no remote fonts) renders effectively
+            # instantly. 50ms is enough for layout/paint flush; the old 300ms
+            # was a worst-case guard that stacked with Chrome cold start to
+            # produce a noticeable visual lag.
+            time.sleep(0.05)
             png = driver.get_screenshot_as_png()
             return png
         finally:

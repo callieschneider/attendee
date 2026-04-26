@@ -106,10 +106,13 @@ def _snapshot_state(bot_id: str) -> dict:
     # Latest chart artifact for the bot's series, if any
     visual = _latest_visual_for_bot(bot_id)
 
+    voice_state = _voice_state(bot_id, cursor)
+
     return {
         "bot_id": bot_id,
         "now": timezone.now().isoformat(),
         "cursor": _cursor_payload(cursor),
+        "voice_state": voice_state,
         "events": [
             {
                 "t": e.event_time.isoformat() if e.event_time else None,
@@ -131,6 +134,36 @@ def _snapshot_state(bot_id: str) -> dict:
         ],
         "thinking": thinking,
         "visual": visual,
+    }
+
+
+def _voice_state(bot_id: str, cursor) -> dict:
+    """
+    Compute a single high-level voice state for the indicator on the canvas.
+    Order of precedence:
+      - "asleep" — user said sleep phrase (sticky Redis flag)
+      - "listening" — audio gate currently open
+      - "idle" — gate closed, no sleep flag (default-pre-session-start)
+    """
+    suspended = False
+    try:
+        from agent.live_session.signals import is_voice_suspended
+        suspended = is_voice_suspended(bot_id)
+    except Exception:
+        suspended = False
+    gate_open = bool(cursor and cursor.audio_gate_open)
+    if suspended:
+        label, color = "ASLEEP", "red"
+    elif gate_open:
+        label, color = "LISTENING", "green"
+    else:
+        label, color = "IDLE", "gray"
+    return {
+        "label": label,
+        "color": color,
+        "suspended": suspended,
+        "gate_open": gate_open,
+        "reason": (cursor.audio_gate_reason if cursor else "") or "",
     }
 
 
@@ -182,7 +215,7 @@ def _latest_visual_for_bot(bot_id: str) -> dict | None:
 
 
 def _canvas_sse(bot_id: str):
-    """Poll-based SSE — 1s tick, always emits `state` event with full snapshot."""
+    """Poll-based SSE — 0.4s tick so the web canvas updates feel ~real-time."""
     yield _sse("hello", {"bot_id": bot_id, "at": timezone.now().isoformat()})
     last_heartbeat = time.monotonic()
     while True:
@@ -194,7 +227,7 @@ def _canvas_sse(bot_id: str):
         if time.monotonic() - last_heartbeat >= 15:
             yield _sse("heartbeat", {"t": timezone.now().isoformat()})
             last_heartbeat = time.monotonic()
-        time.sleep(1.0)
+        time.sleep(0.4)
 
 
 def _sse(event: str, data: Any) -> str:

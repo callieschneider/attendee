@@ -183,14 +183,21 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
         log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
+    # Sleep / wake phrase detection — runs BEFORE gate ops so a "go to
+    # sleep" right after a "Clever Star" doesn't immediately reopen.
+    voice_state_changed = _maybe_handle_voice_state_phrases(bot_id, text)
+
     # Any speech event extends the audio gate if it's already open —
     # this is how conversations feel natural (user doesn't have to re-trigger
     # the agent's name on every turn). Direct-address detection below can
     # still OPEN a closed gate.
-    _extend_gate_safely(bot_id, ttl_seconds=30)
+    _extend_gate_safely(bot_id, ttl_seconds=120)
 
-    # Direct-address detection → open the audio gate (best-effort)
-    _maybe_open_gate_on_address(bot_id, text)
+    # Direct-address detection → open the audio gate AND replay the trigger
+    # utterance to Live as text so it can answer the FIRST utterance (no
+    # "say my name twice" lag).
+    if not voice_state_changed:
+        _maybe_open_gate_on_address(bot_id, text, speaker=speaker)
 
     # Fire-and-forget schedule. Gemini Live handles live conversation
     # natively when the gate is open (low latency, no round-trip through
@@ -245,7 +252,9 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
     ensure_cursor(bot_id)
     occurrence = _find_occurrence_for_bot(bot_id)
 
+    is_self = _is_self_speech(bot_id, speaker)
     raw_with_tag = dict(data) if isinstance(data, dict) else {"raw": data}
+    raw_with_tag["chat_message"] = True
     if is_self:
         raw_with_tag["self_utterance"] = True
 
@@ -255,7 +264,7 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
                 bot_id=bot_id,
                 utterance_ref=utterance_ref,
                 defaults={
-                    "kind": "speech",
+                    "kind": "chat",
                     "event_time": event_time,
                     "speaker": speaker,
                     "speaker_uuid": speaker_uuid,
@@ -265,13 +274,13 @@ def ingest_chat_message(bot_id: str, data: dict) -> dict:
                 },
             )
     except Exception:
-        log.exception("ingest_transcript_update: failed bot=%s ref=%s", bot_id, utterance_ref)
+        log.exception("ingest_chat_message: failed bot=%s ref=%s", bot_id, utterance_ref)
         return {"error": "persist failed"}
 
     # Skip classifier + scheduler entirely for self-utterances.
     if is_self:
         return {
-            "kind": "speech",
+            "kind": "chat",
             "event_id": str(event.id),
             "created": created,
             "self_utterance": True,
@@ -329,22 +338,116 @@ def _is_self_speech(bot_id: str, speaker_name: str) -> bool:
     return name_lower in self_names
 
 
-def _maybe_open_gate_on_address(bot_id: str, text: str) -> bool:
-    """Returns True if the gate was opened (direct address detected)."""
+def _maybe_open_gate_on_address(bot_id: str, text: str, speaker: str = "") -> bool:
     """
-    If the utterance directly addresses the agent, open the audio gate.
-    Runs the classifier synchronously — cheap string pre-filter prevents
-    LLM calls on most utterances.
+    If the utterance directly addresses the agent, open the audio gate
+    AND replay the utterance to Live as text so it can answer the very
+    first utterance instead of waiting for a second one. Without this
+    text-replay, Live never heard the audio for the wake utterance
+    (gate was closed during that audio) and silently waits for the
+    next utterance — the "say my name twice" UX bug.
     """
     try:
         from agent.classifiers import is_addressed
 
         if is_addressed(text):
-            _open_gate_safely(bot_id, reason="direct_address", ttl_seconds=20)
+            # Clear any sticky sleep flag — the user is talking to us again
+            try:
+                from agent.live_session.signals import set_voice_suspended
+                set_voice_suspended(bot_id, False)
+            except Exception:
+                pass
+            _open_gate_safely(bot_id, reason="direct_address", ttl_seconds=180)
+            # Replay the trigger utterance to Live so it has the question
+            # in its context window even though the audio was missed.
+            try:
+                from agent.live_session.signals import publish_voice_context
+
+                replay = f"{speaker or 'User'} just said: {text}"
+                publish_voice_context(bot_id, replay)
+            except Exception:
+                log.exception("_maybe_open_gate_on_address: voice_context replay failed")
             return True
     except Exception:
         log.exception("_maybe_open_gate_on_address: classifier failed bot=%s", bot_id)
     return False
+
+
+# Sleep / wake phrase patterns. Kept narrow + word-boundary anchored to
+# avoid false positives like "let me sleep on it" or "wake me up at noon".
+import re as _re
+
+_SLEEP_PATTERNS = [
+    _re.compile(
+        r"\b(?:go to sleep|go silent|stand by|be quiet|stop listening|"
+        r"mute yourself|hush|pause for now)\b",
+        _re.IGNORECASE,
+    ),
+    # "that's enough" / "that is enough" / "that's enough for now"
+    _re.compile(r"\bthat(?:'s| is| s)?\s+enough\b", _re.IGNORECASE),
+    # "<name>, sleep / silence / stop / enough / be quiet / that's enough"
+    _re.compile(
+        r"\b(?:clever\s*star|cleverstar)\s*[, ]+\s*(?:"
+        r"go to sleep|sleep|silence|stop|stand by|"
+        r"that(?:'s| is| s)?\s+enough|enough(?:\s+for\s+now)?|be quiet"
+        r")\b",
+        _re.IGNORECASE,
+    ),
+]
+_WAKE_PATTERNS = [
+    _re.compile(
+        r"\b(?:wake up|are you there|come back|you can talk|listen up|resume listening)\b",
+        _re.IGNORECASE,
+    ),
+    _re.compile(
+        r"\b(?:clever\s*star|cleverstar)\s*[, ]+\s*(?:wake up|are you there|listen|come back)\b",
+        _re.IGNORECASE,
+    ),
+]
+
+
+def _maybe_handle_voice_state_phrases(bot_id: str, text: str) -> bool:
+    """
+    Detect "go to sleep" / "wake up" style phrases and toggle voice state.
+    Returns True iff a state change was applied.
+    """
+    if not text:
+        return False
+    for pat in _SLEEP_PATTERNS:
+        if pat.search(text):
+            try:
+                from agent.live_session.signals import publish_gate_close, set_voice_suspended
+                set_voice_suspended(bot_id, True)
+                publish_gate_close(bot_id, reason="sleep_phrase")
+                _kick_canvas_safely(bot_id)
+                log.info("voice: SLEEP triggered bot=%s text=%r", bot_id, text[:80])
+            except Exception:
+                log.exception("voice: sleep dispatch failed bot=%s", bot_id)
+            return True
+    for pat in _WAKE_PATTERNS:
+        if pat.search(text):
+            try:
+                from agent.live_session.signals import publish_gate_open, set_voice_suspended
+
+                set_voice_suspended(bot_id, False)
+                publish_gate_open(bot_id, reason="wake_phrase", ttl_seconds=600)
+                from agent.live_session.signals import publish_voice_context
+                publish_voice_context(bot_id, f"User just said: {text}")
+                _kick_canvas_safely(bot_id)
+                log.info("voice: WAKE triggered bot=%s text=%r", bot_id, text[:80])
+            except Exception:
+                log.exception("voice: wake dispatch failed bot=%s", bot_id)
+            return True
+    return False
+
+
+def _kick_canvas_safely(bot_id: str) -> None:
+    """Trigger an immediate canvas refresh so voice-state changes appear ASAP."""
+    try:
+        from agent.canvas.pump import push_canvas_images_for_bot
+        push_canvas_images_for_bot(bot_id)
+    except Exception:
+        log.exception("_kick_canvas_safely: failed bot=%s", bot_id)
 
 
 def _open_gate_safely(bot_id: str, reason: str, ttl_seconds: int = 30) -> None:

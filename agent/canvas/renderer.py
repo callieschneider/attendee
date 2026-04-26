@@ -96,6 +96,10 @@ def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
     if not html_rendered:
         _draw_viz_pane(draw, state, font_title, font_h2, font_body, font_mono_small)
 
+    # Big voice-state pill on top of whatever the right pane drew. Always
+    # visible so the user knows whether the agent is listening at a glance.
+    _draw_voice_indicator(draw, state, font_title)
+
     # Divider
     draw.line([(_WIDTH // 2, 0), (_WIDTH // 2, _HEIGHT)], fill=BORDER, width=1)
 
@@ -113,18 +117,59 @@ def _draw_debug_pane(draw, state, font_title, font_h2, font_body, font_small, fo
     R = _WIDTH // 2 - 24
     y = 28
 
-    # Header
     draw.text((L, y), "Clever Star", fill=FG, font=font_title)
     if state.get("thinking"):
-        # Pulsing dot indicates an in-flight action
         dot_x = R - 18
         draw.ellipse((dot_x, y + 12, dot_x + 12, y + 24), fill=WARN)
         draw.text((dot_x - 80, y + 12), "thinking…", fill=WARN, font=font_small)
 
     y += 50
 
-    # Conversation feed (transcripts + tool actions interleaved)
     _draw_feed(draw, state, L, R, y, _HEIGHT - 30, font_body, font_mono_small)
+
+
+def _draw_voice_indicator(draw, state, font_title):
+    """
+    Big voice-state pill at the top of the right pane so the user can
+    see at a glance whether Clever Star is LISTENING / ASLEEP / IDLE.
+    """
+    voice = state.get("voice_state") or {}
+    label = voice.get("label", "IDLE")
+    color_name = voice.get("color", "gray")
+    color_map = {
+        "green": (16, 185, 129),
+        "red": (239, 68, 68),
+        "gray": (107, 114, 128),
+    }
+    accent = color_map.get(color_name, color_map["gray"])
+
+    mid = _WIDTH // 2
+    pill_x = mid + 24
+    pill_y = 24
+    pill_h = 56
+    text_w = _text_w(draw, label, font_title)
+    pill_w = text_w + 88
+
+    draw.rounded_rectangle(
+        (pill_x, pill_y, pill_x + pill_w, pill_y + pill_h),
+        radius=pill_h // 2,
+        fill=BG_DIM,
+        outline=accent,
+        width=3,
+    )
+    dot_r = 10
+    dot_cx = pill_x + 28
+    dot_cy = pill_y + pill_h // 2
+    draw.ellipse(
+        (dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r),
+        fill=accent,
+    )
+    draw.text(
+        (pill_x + 50, pill_y + (pill_h - font_title.size) // 2 - 2),
+        label,
+        fill=accent,
+        font=font_title,
+    )
 
 
 def _draw_stats(draw, state, L, R, y, font_small, font_mono):
@@ -243,7 +288,8 @@ def _draw_viz_pane(draw, state, font_title, font_h2, font_body, font_mono_small)
     mid = _WIDTH // 2
     L = mid + 24
     R = _WIDTH - 24
-    y = 28
+    # Voice indicator pill occupies y ~24..80; viz starts below it.
+    y = 100
 
     draw.text((L, y), "Canvas", fill=MUTED, font=font_h2)
     y += 24

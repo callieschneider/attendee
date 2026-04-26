@@ -126,19 +126,25 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
 
 
 _SPEC_DESCRIPTION = (
-    "JSON spec describing what to render on the bot's video tile. Choose ONE shape:\n"
-    '  - {"type":"html","html":"<!DOCTYPE html><html>...</html>","title":"..."}\n'
-    "      Full self-contained HTML page. Inline CSS+SVG only, no external resources.\n"
-    "      Theme: dark bg #0a0b0f, light text #e5e7eb, accent #a5b4fc.\n"
-    '      Use this for anything richer than a flat list — preferred for "show me X" requests.\n'
-    "      RECOMMENDED FLOW: call `call_model` (anthropic/claude-haiku-4.5 or sonnet-4.5) to\n"
-    "      generate the HTML first, then pass the HTML string here. Do NOT try to compose\n"
-    "      hundreds of lines of HTML inside this argument yourself.\n"
-    '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}        — server-rendered bar chart\n'
-    '  - {"type":"list","items":["foo","bar", ...]}                     — server-rendered bullet list\n'
+    "JSON spec describing what to render on the bot's video tile. STRONGLY PREFER simple\n"
+    "server-rendered shapes — they appear in <500ms. The `html` shape is a last-resort\n"
+    "fallback for genuinely custom layouts and adds 2-5s of headless-Chrome overhead.\n"
+    "\n"
+    "FAST shapes (use these for ~90% of cases):\n"
+    '  - {"type":"list","items":["foo","bar", ...]}                     — bullet list (use for "show me bullet points / 5 things / a list")\n'
+    '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}        — bar chart\n'
     '  - {"type":"table","rows":[["Name","Status"],["Foo","OK"], ...]}  — first row is header\n'
-    '  - {"type":"text","text":"..."}                                   — plain text card\n'
-    "Keep data small (≤12 items). Always include a `type` field."
+    '  - {"type":"text","text":"..."}                                   — single text card\n'
+    "\n"
+    "SLOW shape (only when the above genuinely cannot express what was asked):\n"
+    '  - {"type":"html","html":"<!DOCTYPE html><html>...</html>","title":"..."}\n'
+    "      Full self-contained HTML page (inline CSS+SVG, no JS, no external resources).\n"
+    "      Theme: dark bg #0a0b0f, light text #e5e7eb, accent #a5b4fc.\n"
+    "      DO NOT compose long HTML inside this arg yourself; if you go this route,\n"
+    "      first call `call_model` to draft the HTML, then pass it here.\n"
+    "\n"
+    "Keep data small (≤12 items). Always include a `type` field. For 'show 5 bullet "
+    "points', the right answer is `{\"type\":\"list\",\"items\":[...]}` — never html."
 )
 
 
@@ -147,10 +153,10 @@ TOOLS: list[ToolDefinition] = [
         name="create_visual",
         description=(
             "Render a visual on the bot's video tile in the meeting. The canvas "
-            "updates within ~1 second. Use this any time the user asks to 'show', "
-            "'display', 'put up', 'draw', 'visualize', or anything similar. For "
-            "rich layouts, first call `call_model` to generate the HTML, then pass "
-            "it via spec={'type':'html','html':<HTML>,'title':<title>}."
+            "updates within ~500ms when using simple types (list/bar/table/text). "
+            "Use this any time the user asks to 'show', 'display', 'put up', 'draw', "
+            "'visualize', or anything similar. PREFER `type: list/bar/table/text` "
+            "for speed — only fall back to `type: html` for genuinely custom layouts."
         ),
         input_schema=ToolSchema(
             type="object",
