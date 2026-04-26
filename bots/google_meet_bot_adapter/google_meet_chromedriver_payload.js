@@ -2271,44 +2271,77 @@ function clickLanguageOption(languageCode) {
     }
 }
 
+function findCameraToggleButton() {
+    // Walk every clickable-ish element and match by any label-bearing
+    // attribute. Google Meet rotates between <button>, <div role="button">,
+    // and sometimes nests an icon span as the click target — so we cast a
+    // wide net.
+    const candidates = Array.from(document.querySelectorAll(
+        'button, div[role="button"], [role="button"], [data-promo-anchor-id]'
+    ));
+    const labelOf = el => (
+        el.getAttribute('aria-label') ||
+        el.getAttribute('data-tooltip') ||
+        el.title ||
+        el.textContent ||
+        ''
+    ).trim().toLowerCase();
+    const isOff = el => {
+        const ap = el.getAttribute('aria-pressed');
+        if (ap === 'false') return true;
+        if (ap === 'true') return false;
+        // No aria-pressed: assume off if label says "turn on"
+        return labelOf(el).startsWith('turn on');
+    };
+    // Tier 1: explicit "turn on camera" / "turn on video"
+    let hit = candidates.find(el => {
+        const l = labelOf(el);
+        return (l === 'turn on camera' || l === 'turn on video' ||
+                l.startsWith('turn on camera') || l.startsWith('turn on video'));
+    });
+    if (hit) return hit;
+    // Tier 2: data-promo-anchor-id with off state
+    hit = candidates.find(el =>
+        el.getAttribute('data-promo-anchor-id') === 'camera-button' && isOff(el)
+    );
+    if (hit) return hit;
+    // Tier 3: any button whose label contains "camera" or "video" and is off
+    hit = candidates.find(el => {
+        const l = labelOf(el);
+        return (l.includes('camera') || l.includes('video') || l.includes('webcam')) && isOff(el);
+    });
+    return hit || null;
+}
+
 async function turnOnCamera() {
-    // Click camera button to turn it on
     let cameraButton = null;
-    const numAttempts = 30;
+    // 80 attempts × 150ms = 12s — Meet's pre-join → in-call transition
+    // can take 5-10s on cold starts before the in-call camera button mounts.
+    const numAttempts = 80;
     for (let i = 0; i < numAttempts; i++) {
-        cameraButton = (
-            document.querySelector('button[aria-label="Turn on camera"]') ||
-            document.querySelector('div[aria-label="Turn on camera"]') ||
-            document.querySelector('button[aria-label="turn on camera"]') ||
-            document.querySelector('button[data-tooltip="Turn on camera"]') ||
-            document.querySelector('[data-promo-anchor-id="camera-button"][aria-pressed="false"]') ||
-            (() => {
-                // Fallback: find any camera-related button that is currently toggled off
-                const btns = Array.from(document.querySelectorAll('button[aria-pressed="false"]'));
-                return btns.find(b => {
-                    const lbl = (b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || b.title || '').toLowerCase();
-                    return lbl.includes('camera') || lbl.includes('video');
-                }) || null;
-            })()
-        );
-        if (cameraButton) {
-            break;
+        cameraButton = findCameraToggleButton();
+        if (cameraButton) break;
+        if (i % 10 === 0) {
+            window.ws.sendJson({
+                type: 'Error',
+                message: `Camera button not found in turnOnCamera (attempt ${i+1}/${numAttempts})`
+            });
         }
-        window.ws.sendJson({
-            type: 'Error',
-            message: 'Camera button not found in turnOnCamera, but will try again'
-        });
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, 150));
     }
-    
+
     if (cameraButton) {
-        console.log("Clicking the camera button to turn it on");
-        cameraButton.click();
+        console.log("Clicking the camera button to turn it on", cameraButton);
+        try { cameraButton.click(); } catch (e) {
+            // Some Meet builds make the icon-span the click target — try parent
+            try { (cameraButton.closest('button') || cameraButton.parentElement).click(); }
+            catch (e2) { console.log("Camera click failed", e2); }
+        }
     } else {
-        console.log("Camera button not found");
+        console.log("Camera button not found after extended retry");
         window.ws.sendJson({
             type: 'Error',
-            message: 'Camera button not found in turnOnCamera'
+            message: 'Camera button not found in turnOnCamera (gave up)'
         });
     }
 }
@@ -2345,21 +2378,13 @@ function turnOnMicAndCamera() {
         console.log("Microphone button not found");
     }
 
-    // Click camera button to turn it on
-    const cameraButton = (
-        document.querySelector('button[aria-label="Turn on camera"]') ||
-        document.querySelector('button[data-tooltip="Turn on camera"]') ||
-        (() => {
-            const btns = Array.from(document.querySelectorAll('button[aria-pressed="false"]'));
-            return btns.find(b => {
-                const lbl = (b.getAttribute('aria-label') || b.getAttribute('data-tooltip') || b.title || '').toLowerCase();
-                return lbl.includes('camera') || lbl.includes('video');
-            }) || null;
-        })()
-    );
+    const cameraButton = findCameraToggleButton();
     if (cameraButton) {
         console.log("Clicking the camera button to turn it on");
-        cameraButton.click();
+        try { cameraButton.click(); } catch (e) {
+            try { (cameraButton.closest('button') || cameraButton.parentElement).click(); }
+            catch (e2) { console.log("Camera click failed", e2); }
+        }
     } else {
         console.log("Camera button not found");
     }

@@ -128,27 +128,66 @@ def _snapshot_state(bot_id: str) -> dict:
     # the configured agent persona ("Clever Star"). Map self-utterance speakers
     # to the configured AGENT_NAME so the canvas shows one consistent label.
     bot_display_name = _bot_display_name(bot_id)
+    # region agent log
+    log.warning("DBG68285d G display_name=%r events=%d", bot_display_name, len(events))
+    # endregion
 
     def _display_speaker(e) -> str:
         raw = e.raw or {}
-        if raw.get("self_utterance"):
+        is_self = raw.get("self_utterance")
+        # region agent log
+        if e.speaker == "Meeting Agent":
+            log.warning("DBG68285d G_alias raw_keys=%r is_self=%r bot_display=%r returning=%r",
+                list(raw.keys()), is_self, bot_display_name,
+                bot_display_name if is_self else (e.speaker or ""))
+        # endregion
+        if is_self:
+            return bot_display_name
+        # Fallback: even if self_utterance flag is missing on older rows,
+        # the SSO display name "Meeting Agent" is unambiguously the bot.
+        if (e.speaker or "").strip().lower() == "meeting agent":
             return bot_display_name
         return e.speaker or ""
+
+    # Coalesce consecutive same-speaker chunks into one bubble. Attendee
+    # finalizes utterances at audio gaps, so a single answer often arrives
+    # split across 3-5 events. Showing each as its own card makes the bot
+    # look like it's repeating itself.
+    raw_events = [
+        {
+            "t": e.event_time.isoformat() if e.event_time else None,
+            "ts": e.event_time.timestamp() if e.event_time else 0.0,
+            "kind": e.kind,
+            "speaker": _display_speaker(e),
+            "text": (e.text or "")[:280],
+        }
+        for e in events
+    ]
+    merged: list[dict] = []
+    COALESCE_GAP_S = 12.0
+    MAX_BUBBLE_CHARS = 600
+    for ev in raw_events:
+        if (
+            merged
+            and merged[-1]["speaker"] == ev["speaker"]
+            and merged[-1]["kind"] == ev["kind"]
+            and (ev["ts"] - merged[-1].get("_last_ts", ev["ts"])) <= COALESCE_GAP_S
+            and len(merged[-1]["text"]) + len(ev["text"]) + 1 <= MAX_BUBBLE_CHARS
+        ):
+            merged[-1]["text"] = (merged[-1]["text"].rstrip() + " " + ev["text"].lstrip()).strip()
+            merged[-1]["_last_ts"] = ev["ts"]
+        else:
+            merged.append({**ev, "_last_ts": ev["ts"]})
+    for ev in merged:
+        ev.pop("_last_ts", None)
+        ev.pop("ts", None)
 
     return {
         "bot_id": bot_id,
         "now": timezone.now().isoformat(),
         "cursor": _cursor_payload(cursor),
         "voice_state": voice_state,
-        "events": [
-            {
-                "t": e.event_time.isoformat() if e.event_time else None,
-                "kind": e.kind,
-                "speaker": _display_speaker(e),
-                "text": (e.text or "")[:280],
-            }
-            for e in events
-        ],
+        "events": merged,
         "actions": [
             {
                 "t": a.created_at.isoformat(),
