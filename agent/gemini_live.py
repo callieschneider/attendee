@@ -15,15 +15,21 @@ log = logging.getLogger("agent.gemini_live")
 AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
 
 
-# Tools that Gemini Live is allowed to call DIRECTLY. Everything else flows
-# through the Turn Processor (Claude Haiku 4.5) on the worker side via the
-# multi-round agent loop. This keeps Live focused on conversation + fast
-# read-only lookups, and prevents races/duplicate writes between Live and
-# the Turn Processor on the same transcript chunk.
+# Tools that Gemini Live is allowed to call DIRECTLY. Live IS Clever Star —
+# the user-facing entity — so it owns every tool the user could verbally
+# request. The Turn Processor (Haiku 4.5) only runs in the background to
+# capture missed action items (decisions, URLs, side-channel notes) when
+# Live didn't already act.
 #
-# MUST stay in sync with `_LIVE_READ_ONLY_TOOLS` in
+# Earlier versions split tools between Live (read-only) and Turn Processor
+# (writes). That created the "voice says On it but nothing happens" bug:
+# Live narrated an acknowledgement, then the brain frequently failed to
+# fire the actual tool. The single-decision-path model below fixes that.
+#
+# MUST stay in sync with `_LIVE_ALLOWED_TOOLS` in
 # `agent/live_session/manager.py` (the runtime gate).
 _LIVE_VISIBLE_TOOL_NAMES = {
+    # Read / lookup
     "list_tasks",
     "list_series",
     "list_upcoming_meetings",
@@ -37,11 +43,22 @@ _LIVE_VISIBLE_TOOL_NAMES = {
     "read_recent_chat",
     "web_search",
     "fetch_url",
+    # Visuals — must be sub-second. Live owns these.
+    "create_visual",
+    "update_visual",
+    # Tasks & artifacts — user verbally asks Clever Star to capture them.
+    "create_task",
+    "update_task_status",
+    "create_artifact",
+    "save_artifact_from_url",
+    "promote_meeting_task",
+    # Chat / email — secondary channels Live drives directly.
+    "send_chat_message",
+    "send_email_summary",
+    # Heavier reasoning when a simple visual won't do.
+    "call_model",
     # Voice state — Live calls these directly when the user signals
-    # sleep/wake intent. Not "writes" in the Turn-Processor sense; they
-    # only flip an in-memory/Redis flag and are required for sub-second
-    # responsiveness. Kept symmetric with `_LIVE_READ_ONLY_TOOLS` in
-    # `agent/live_session/manager.py`.
+    # sleep/wake intent. Required for sub-second responsiveness.
     "voice_sleep",
     "voice_wake",
 }
@@ -49,10 +66,10 @@ _LIVE_VISIBLE_TOOL_NAMES = {
 
 def _gather_tool_schemas_for_gemini_live() -> list[dict]:
     """
-    Expose ONLY read-only tools to Gemini Live. Same BLOCKING behavior
-    pattern as abstrakt's working setup. Everything else (writes, visuals,
-    call_model, voice/chat replies) is handled by the Turn Processor agent
-    loop running on the worker.
+    Expose every user-facing tool to Gemini Live so it can act on requests
+    immediately rather than narrating and hoping the Turn Processor follows
+    through. Same BLOCKING behavior pattern as abstrakt's working setup.
+    The Turn Processor stays in the loop only for background capture.
     """
     decls = []
     for t in TOOL_REGISTRY.values():
@@ -104,6 +121,19 @@ def build_live_setup(
         "contextWindowCompression": {"slidingWindow": {}},
         "inputAudioTranscription": {},
         "outputAudioTranscription": {},
+        # Aggressive VAD so the user can interrupt mid-sentence and so the
+        # first utterance after silence registers immediately. Defaults are
+        # tuned for human-to-human pacing; for a meeting bot we want
+        # snappier turn-taking.
+        "realtimeInputConfig": {
+            "automaticActivityDetection": {
+                "disabled": False,
+                "startOfSpeechSensitivity": "START_SENSITIVITY_HIGH",
+                "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+                "prefixPaddingMs": 20,
+                "silenceDurationMs": 100,
+            },
+        },
     }
 
     return {"setup": setup}

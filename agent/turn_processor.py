@@ -35,6 +35,32 @@ log = logging.getLogger("agent.turn_processor")
 # Cap how many events we feed into a single turn (protects against burst storms)
 MAX_CHUNK_SIZE = 80
 
+# Tools that the live voice agent (Gemini Live) is responsible for while
+# the audio channel is engaged. The Turn Processor blocks these to avoid
+# duplicate / racing calls. Lookups stay open so the brain can investigate
+# something silently if it wants — but it should rarely need to.
+_VOICE_OWNED_TOOLS = frozenset({
+    # Visuals
+    "create_visual",
+    "update_visual",
+    # Capture
+    "create_task",
+    "update_task_status",
+    "create_artifact",
+    "save_artifact_from_url",
+    "promote_meeting_task",
+    "assign_meeting_to_series",
+    # Channels
+    "send_chat_message",
+    "send_email_summary",
+    "speak_via_voice",
+    # Voice state
+    "voice_sleep",
+    "voice_wake",
+    # Heavier reasoning is owned by the voice path too
+    "call_model",
+})
+
 # Multi-round agent loop — how many model+tool roundtrips per turn.
 # 5 is plenty for meeting context (most turns finish in 1-2 rounds; 5 gives
 # headroom for chained ops like list_tasks -> update_task_status -> speak).
@@ -350,14 +376,15 @@ def _run_agent_loop(
                 _push_tool_result(messages, call_id, {"error": msg})
                 continue
 
-            # Channel routing: respect trigger kind. If user asked in chat,
-            # route any speak_via_voice to send_chat_message; if voice and
-            # gate is open, suppress send_chat_message; if gate is open, the
-            # Turn Processor should NOT also speak (Live owns the mic).
-            if voice_conversation_active and tool_name in ("speak_via_voice", "send_chat_message"):
-                # Live is talking; the loop's "speak" pathway is the voice
-                # briefing (pushed after the loop completes), not direct TTS.
-                msg = f"suppressed {tool_name}: voice gate is open (Live owns voice)"
+            # When the voice channel is engaged, the live voice agent owns
+            # ALL user-facing tool calls. The Turn Processor's job there is
+            # purely background capture — anything that races with the
+            # voice agent gets blocked here. Silent observation is the goal.
+            if voice_conversation_active and tool_name in _VOICE_OWNED_TOOLS:
+                msg = (
+                    f"blocked {tool_name}: voice agent owns user-facing tools "
+                    f"while audio is engaged"
+                )
                 log.info("turn: %s bot=%s", msg, bot_id)
                 _push_tool_result(messages, call_id, {"success": False, "skipped": msg})
                 continue
@@ -624,22 +651,25 @@ def _render_user_prompt(
 
     if trigger_kind == "chat":
         lines.append(
-            "The user addressed you in chat. Reply via `send_chat_message` "
-            "(1–2 sentences). Do NOT use `speak_via_voice` — chat is chat."
+            "Trigger: chat message. Reply via `send_chat_message` (1–2 "
+            "sentences). Do NOT use `speak_via_voice`."
         )
     elif voice_conversation_active:
         lines.append(
-            "Your audio channel is currently engaged with the user. Handle the "
-            "action side here: call the tools needed to fulfill the request "
-            "(search, list, create, update, create_visual…). Do NOT call "
-            "`speak_via_voice` or `send_chat_message` — the audio side is "
-            "already replying."
+            "Voice channel is ACTIVELY engaged. The voice agent is replying "
+            "and calling its own tools (visuals, tasks, artifacts, chat, "
+            "email, voice_sleep/wake). Default to NOOP. Do NOT call any "
+            "user-facing tool here — duplicates will race the voice agent. "
+            "Only act if the chunk reveals a clear action item the voice "
+            "agent demonstrably missed (e.g., a URL shared as an aside that "
+            "no one acknowledged). Otherwise reply with no tool calls and "
+            "a one-line note."
         )
     else:
         lines.append(
-            "The user is not actively addressing you. Quietly capture clear "
-            "action items (`create_task`), shared URLs (`save_artifact_from_url`), "
-            "or decisions worth saving. If nothing stands out, reply with no "
-            "tool calls and a short note."
+            "Voice channel is QUIET. Capture clear missed items: explicit "
+            "action items (`create_task`), shared URLs "
+            "(`save_artifact_from_url`), decisions worth saving. If nothing "
+            "stands out, reply with no tool calls and a short note."
         )
     return "\n".join(lines)

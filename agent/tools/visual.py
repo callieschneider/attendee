@@ -39,6 +39,11 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
     title = (inp.get("title") or "Visual").strip()
     series_id = ensure_series_id(inp, ctx)
 
+    # region agent log
+    log.warning("DBG68285d D create_visual series=%s ctx_series=%s bot=%s spec_type=%s",
+        series_id, ctx.get("series_id"), ctx.get("bot_id"), spec.get("type") if isinstance(spec, dict) else "?")
+    # endregion
+
     try:
         artifact = Artifact.objects.create(
             series_id=series_id,

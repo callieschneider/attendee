@@ -164,6 +164,12 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     ensure_cursor(bot_id)
     occurrence = _find_occurrence_for_bot(bot_id)
 
+    # Build raw payload — tag self-utterances so the JSONField Q filters in
+    # scheduler.py and turn_processor.py can reliably exclude them.
+    raw_payload = dict(data)
+    if is_self:
+        raw_payload["self_utterance"] = True
+
     try:
         with transaction.atomic():
             event, created = TranscriptEvent.objects.update_or_create(
@@ -175,7 +181,7 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
                     "speaker": speaker,
                     "speaker_uuid": speaker_uuid,
                     "text": text,
-                    "raw": data,
+                    "raw": raw_payload,
                     "occurrence": occurrence,
                 },
             )
@@ -205,6 +211,9 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     # the Turn Processor). The Turn Processor still runs for actions
     # (tasks, artifacts, URLs) — but not just to produce a spoken reply
     # during an active conversation.
+    # region agent log
+    log.warning("DBG68285d A transcript_ingested bot=%s speaker=%r is_self=%s self_utterance_tagged=%s text=%r", bot_id, speaker, is_self, raw_payload.get("self_utterance"), text[:80])
+    # endregion
     _schedule_turn_safely(bot_id)
 
     return {

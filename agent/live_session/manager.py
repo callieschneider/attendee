@@ -41,17 +41,20 @@ GEMINI_OUTPUT_RATE = 24000
 
 
 # Tools Gemini Live is allowed to execute DIRECTLY from its toolCall stream.
-# Anything outside this set must go through the Turn Processor (Claude Haiku
-# 4.5) where it's tracked in ActionLogEntry and benefits from the multi-round
-# agent loop with tool-result feedback. Letting Live call write tools here
-# (create_task / create_visual / etc.) caused duplicate actions and races
-# with the Turn Processor on the same chunk.
+# Live IS the user-facing agent (Clever Star) so it owns every user-facing
+# tool: lookups, visuals, task/artifact writes, chat/email, voice state,
+# heavier reasoning via call_model. The Turn Processor (Haiku 4.5) runs
+# only in the background, capturing items Live didn't already act on.
 #
-# These read-only tools are safe because:
-#   - they don't mutate user state
-#   - they're cheap (<200ms typically)
-#   - the user wants them answered conversationally in real-time
-_LIVE_READ_ONLY_TOOLS = frozenset({
+# Why this set is safe (as opposed to the earlier read-only-only design):
+#   - Each Live toolCall logs an ActionLogEntry up front, so the Turn
+#     Processor sees the action in its prompt and won't redo it.
+#   - The Turn Processor's prompt explicitly forbids re-firing user-
+#     requested tools while voice is active.
+#   - Every tool here is short-lived enough (<3s) to be fine inside the
+#     Live toolCall round-trip.
+_LIVE_ALLOWED_TOOLS = frozenset({
+    # Read / lookup
     "list_tasks",
     "list_series",
     "list_upcoming_meetings",
@@ -65,20 +68,35 @@ _LIVE_READ_ONLY_TOOLS = frozenset({
     "read_recent_chat",
     "web_search",
     "fetch_url",
-    # Voice state flips. Cheap, idempotent, must run with sub-second
-    # latency. Live calls them directly; do NOT defer to the Turn
-    # Processor (would add a ~1s round-trip to "shut up").
+    # Visuals
+    "create_visual",
+    "update_visual",
+    # Tasks & artifacts
+    "create_task",
+    "update_task_status",
+    "create_artifact",
+    "save_artifact_from_url",
+    "promote_meeting_task",
+    # Chat / email
+    "send_chat_message",
+    "send_email_summary",
+    # Heavier reasoning (still keep latency by using only when needed)
+    "call_model",
+    # Voice state flips
     "voice_sleep",
     "voice_wake",
 })
 
-# Friendly note returned to Live when it tries to call a write tool.
-# The Turn Processor will pick up the same user utterance from the
-# transcript and execute the action there.
+# Backwards-compat alias: a few callers (and tests) still reference the
+# old name. Pointing it at the same set keeps them working.
+_LIVE_READ_ONLY_TOOLS = _LIVE_ALLOWED_TOOLS
+
+# Friendly error returned to Live if it ever tries to call a tool that
+# isn't in the allowed set (shouldn't happen with the new prompt, but
+# the guardrail stays).
 _LIVE_WRITE_REJECTION_TEMPLATE = (
-    "Tool '{name}' is dispatched by the agent loop, not by the live voice "
-    "model. The action will be executed shortly — narrate that you're "
-    "working on it, don't retry."
+    "Tool '{name}' isn't available right now. Try a different approach or "
+    "tell the user what you can do instead."
 )
 
 
@@ -97,6 +115,16 @@ class LiveSessionManager:
         # transcript shows "twice in the same turn" duplication.
         self._bot_speaking_until: float = 0.0
         self._interrupted_until: float = 0.0
+        # Setup audio buffer: while Gemini Live is still negotiating
+        # `setupComplete`, attendee mic audio arrives but we have no
+        # WebSocket to forward it on. Without buffering, the user's
+        # opening utterance is silently dropped — that's the
+        # "took 2-3 questions to get a response" UX bug.
+        # We hold up to ~2 seconds of audio (capped to avoid OOM during
+        # long setup hangs) and flush it the moment setup completes.
+        self._setup_complete: bool = False
+        self._setup_audio_buffer: list[dict] = []
+        self._SETUP_BUFFER_MAX_FRAMES = 100  # ~2s at 50 frames/s
 
     # ── Public entrypoint ────────────────────────────────────────────────────
 
@@ -134,6 +162,11 @@ class LiveSessionManager:
         from agent.context_engine.builder import build_context
         from agent.gemini_live import build_live_setup
 
+        # Reset setup state for reconnects so the audio buffer kicks back in
+        # while the new session negotiates `setupComplete`.
+        self._setup_complete = False
+        self._setup_audio_buffer = []
+
         @sync_to_async
         def _build():
             result = build_context(bot_id=self.bot_id, task="initial_voice_setup")
@@ -160,6 +193,10 @@ class LiveSessionManager:
             msg = json.loads(raw)
             if "setupComplete" in msg:
                 log.info("live_session: setupComplete bot=%s", self.bot_id)
+                self._setup_complete = True
+                # Flush any audio that arrived while setup was negotiating
+                # — keeps the user's opening utterance from being lost.
+                await self._flush_setup_audio_buffer()
                 await self._persist_session_opened()
                 # AWAKE BY DEFAULT: open the audio gate immediately so the
                 # very first user utterance reaches Gemini Live. Without
@@ -304,13 +341,13 @@ class LiveSessionManager:
                     # log once at INFO and drop the chunk.
                     log.debug("live_session: audio while gate closed bot=%s (dropped)", self.bot_id)
                     continue
-                # Mark "bot is currently speaking" — used by the audio pump to
-                # drop incoming mic audio for the duration of bot speech +
-                # a small echo-tail window. Each audio frame extends this.
-                # Trimmed to 0.3s to make user interruptions feel instant —
-                # 0.6s caused noticeable "I'm trying to butt in but it
-                # doesn't hear me" lag.
-                self._bot_speaking_until = time.monotonic() + 0.3
+                # Mark "bot is currently speaking" — used by the audio pump
+                # to drop incoming mic audio for the duration of bot speech
+                # + a small echo-tail window. Each audio frame extends
+                # this. Trimmed to 0.12s so user interruptions land in
+                # under ~150ms — anything higher feels laggy ("I'm trying
+                # to butt in but she keeps talking").
+                self._bot_speaking_until = time.monotonic() + 0.12
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:
@@ -353,24 +390,25 @@ class LiveSessionManager:
             name = c.get("name", "")
             args = c.get("args", {}) or {}
             call_id = c.get("id", "")
-            if _LIVE_READ_ONLY_TOOLS is not None and name not in _LIVE_READ_ONLY_TOOLS:
-                # Write tool — defer to the Turn Processor. Trigger an
-                # immediate turn so the action happens with low latency,
-                # then return a graceful note to Live so it can narrate.
+            if name not in _LIVE_ALLOWED_TOOLS:
+                # Should not happen — Gemini Live is only shown tools from
+                # the allowed set. Guardrail in case the model hallucinates
+                # a tool name. We don't defer to the Turn Processor here;
+                # that path was the source of the "On it" / nothing-happens
+                # bug.
                 rejection = _LIVE_WRITE_REJECTION_TEMPLATE.format(name=name)
                 responses.append(
                     {
                         "id": call_id,
                         "name": name,
-                        "response": {"deferred": True, "message": rejection},
+                        "response": {"error": rejection},
                     }
                 )
                 await self._log_action_create(
                     name, args,
-                    status="deferred",
-                    error_msg=f"deferred to turn processor: {name}",
+                    status="error",
+                    error_msg=f"unknown tool: {name}",
                 )
-                self._kick_turn_processor()
                 continue
 
             # Log "pending" IMMEDIATELY so the canvas shows the in-flight action.
@@ -582,6 +620,35 @@ class LiveSessionManager:
         except Exception:
             log.exception("_log_action_finish: wrapper failed")
 
+    async def _flush_setup_audio_buffer(self) -> None:
+        """Send any audio captured during setup once Gemini is ready."""
+        if not self._setup_audio_buffer:
+            return
+        buf = self._setup_audio_buffer
+        self._setup_audio_buffer = []
+        log.info(
+            "live_session: flushing %d buffered audio frames bot=%s",
+            len(buf), self.bot_id,
+        )
+        for frame in buf:
+            try:
+                async with self._send_lock:
+                    await self._gemini_ws.send(
+                        json.dumps(
+                            {
+                                "realtimeInput": {
+                                    "audio": {
+                                        "data": frame["data"],
+                                        "mimeType": f"audio/pcm;rate={ATTENDEE_SAMPLE_RATE}",
+                                    }
+                                }
+                            }
+                        )
+                    )
+            except Exception:
+                log.exception("live_session: setup-buffer flush failed bot=%s", self.bot_id)
+                return
+
     async def _attendee_audio_pump(self) -> None:
         """Forward Attendee audio into Gemini Live iff gate is open."""
         try:
@@ -616,6 +683,14 @@ class LiveSessionManager:
                     continue
                 if sample_rate != ATTENDEE_SAMPLE_RATE:
                     pcm = pcm16_resample(pcm, sample_rate, ATTENDEE_SAMPLE_RATE)
+                pcm_b64 = pcm16_to_b64(pcm)
+                # Buffer audio if Gemini Live isn't ready yet — keeps the
+                # user's opening utterance from being silently dropped
+                # during setup negotiation.
+                if not self._setup_complete:
+                    if len(self._setup_audio_buffer) < self._SETUP_BUFFER_MAX_FRAMES:
+                        self._setup_audio_buffer.append({"data": pcm_b64})
+                    continue
                 try:
                     async with self._send_lock:
                         await self._gemini_ws.send(
@@ -623,7 +698,7 @@ class LiveSessionManager:
                                 {
                                     "realtimeInput": {
                                         "audio": {
-                                            "data": pcm16_to_b64(pcm),
+                                            "data": pcm_b64,
                                             "mimeType": f"audio/pcm;rate={ATTENDEE_SAMPLE_RATE}",
                                         }
                                     }

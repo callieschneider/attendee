@@ -108,6 +108,7 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
 
     cursor = ensure_cursor(bot_id)
     if cursor.budget_exceeded:
+        log.warning("DBG68285d B0 early_return=skipped_budget bot=%s", bot_id)
         return "skipped_budget"
 
     now = timezone.now()
@@ -118,21 +119,27 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
         and cursor.last_turn_at
         and (now - cursor.last_turn_at).total_seconds() < TURN_DEBOUNCE_SECONDS
     ):
+        log.warning("DBG68285d B0 early_return=deferred_recent bot=%s last_turn_at=%s", bot_id, cursor.last_turn_at)
         return "deferred_recent"
 
     # Find new events since cursor — exclude:
     #   - self-utterances (the bot's own TTS played back through mixed audio)
     #   - gemini_live transcripts (display-only; Attendee webhooks are the
     #     canonical source feeding the agent loop)
+    # NOTE: JSONField `.exclude(key=val)` silently drops rows where the key is
+    # absent (NOT NULL == NULL == false). Use explicit null-safe Q filters instead.
+    from django.db.models import Q
     qs = (
         TranscriptEvent.objects.filter(bot_id=bot_id)
-        .exclude(raw__self_utterance=True)
-        .exclude(raw__source="gemini_live")
+        .filter(Q(raw__self_utterance__isnull=True) | Q(raw__self_utterance=False))
+        .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
     )
     if cursor.cursor_event_time:
         qs = qs.filter(event_time__gt=cursor.cursor_event_time)
     latest = qs.order_by("-event_time", "-created_at").first()
     if latest is None:
+        total = TranscriptEvent.objects.filter(bot_id=bot_id).count()
+        log.warning("DBG68285d B0 early_return=no_new_events bot=%s cursor_event_time=%s total_events=%d", bot_id, cursor.cursor_event_time, total)
         return "no_new_events"
 
     # Trigger decision
@@ -156,12 +163,20 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
         or pause_trigger
     )
 
+    # region agent log
+    log.warning("DBG68285d B should_run=%s bot=%s priority=%s gap=%.1f silence=%.1f window=%.1f pause_trigger=%s is_wake=%s text=%r",
+        should_run, bot_id, priority, gap, silence, window, pause_trigger, _is_wake_trigger(latest), (latest.text or "")[:60])
+    # endregion
+
     if not should_run:
+        log.warning("DBG68285d B waiting bot=%s gap=%.1f silence=%.1f window=%.1f pause_min=%.1f is_wake=%s text=%r",
+            bot_id, gap, silence, window, min_content_for_pause, _is_wake_trigger(latest), (latest.text or "")[:60])
         return "waiting"
 
     # Single-flight lock — prevents N webhooks-in-a-burst from enqueuing N turns
     # before any of them has a chance to update cursor.last_turn_at.
     if not _try_acquire_inflight(bot_id):
+        log.warning("DBG68285d B deferred_inflight bot=%s", bot_id)
         return "deferred_inflight"
 
     # Enqueue the task (soft_time_limit in the task itself)
@@ -169,11 +184,12 @@ def _maybe_schedule(bot_id: str, priority: str) -> str:
         from agent.turn_processor import process_meeting_turn
 
         cursor_iso = cursor.cursor_event_time.isoformat() if cursor.cursor_event_time else None
-        process_meeting_turn.delay(
+        result = process_meeting_turn.delay(
             bot_id=bot_id,
             cursor_event_time_iso=cursor_iso,
             priority=priority,
         )
+        log.warning("DBG68285d B enqueued bot=%s task_id=%s", bot_id, result.id)
         return "scheduled"
     except Exception:
         # If enqueue failed, release the lock so we don't block future turns
