@@ -40,16 +40,15 @@ AGENT_PAUSE_MIN_CONTENT_SECONDS = float(os.getenv("AGENT_PAUSE_MIN_CONTENT_SECON
 # wake phrase. Refreshed on every speech event.
 AGENT_GATE_DEFAULT_TTL_SECONDS = int(os.getenv("AGENT_GATE_DEFAULT_TTL_SECONDS", "1800"))
 
-# Celery Beat schedule — runs inside the worker process (celery -B flag).
-# Canvas pump ticks every 0.5s for snappy visual feedback. Combined with
-# event-driven push (`_kick_canvas_pump` from tools and bridge), the user
-# sees changes within ~50ms of the event that caused them.
-CELERY_BEAT_SCHEDULE = {
-    "agent-canvas-pump": {
-        "task": "agent.canvas.pump.push_canvas_images",
-        "schedule": float(os.getenv("AGENT_CANVAS_PUMP_SECONDS", "0.5")),
-    },
-}
+# Canvas pump runs as a daemon thread inside the web (gunicorn) container,
+# NOT as a celery beat task. The worker container has
+# CELERY_WORKER_MAX_TASKS_PER_CHILD=1, which forks a brand-new Python
+# process per task — completely incompatible with a 0.5s tick rate (we
+# observed 1700+ message backlog with no progress). The daemon-thread
+# version reuses one chromedriver across iterations and uses a Redis
+# lock so only one of the N gunicorn workers actually drives the pump.
+# See agent/canvas/pump_daemon.py.
+CELERY_BEAT_SCHEDULE = {}
 AGENT_MAX_TURN_BUDGET_USD = float(os.getenv("AGENT_MAX_TURN_BUDGET_USD", "10.00"))
 AGENT_SEMANTIC_TOKEN_BUDGET = int(os.getenv("AGENT_SEMANTIC_TOKEN_BUDGET", "10500"))
 AGENT_MMR_LAMBDA = float(os.getenv("AGENT_MMR_LAMBDA", "0.7"))
