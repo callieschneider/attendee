@@ -325,8 +325,22 @@ class LiveSessionManager:
             # modelTurn frames briefly after emitting 'interrupted' while
             # its TTS stream drains).
             self._interrupted_until = time.monotonic() + 0.5
-            # Also reset the bot-speaking flag so user can speak immediately.
-            self._bot_speaking_until = 0.0
+            # CRITICAL: do NOT zero _bot_speaking_until here. A "real"
+            # barge-in interrupt is indistinguishable from an echo-induced
+            # one (bot's own voice leaking back through Meet's audio mixer,
+            # tripping Gemini's VAD). If we re-open the mic immediately we
+            # feed more echo back into Gemini, which hears phantom user
+            # speech, fires another interrupt, and the model loops on "my
+            # mistake" trying to course-correct. Instead, EXTEND the echo
+            # suppression window by ~600ms — that's enough to cover the
+            # echo tail of whatever just stopped streaming. A genuine user
+            # barge-in will still get through after the tail (and Gemini
+            # has already received the audio frame that triggered the
+            # interrupt — that frame produced this very signal).
+            self._bot_speaking_until = max(
+                self._bot_speaking_until,
+                time.monotonic() + 0.6,
+            )
         if self._interrupted_until > time.monotonic():
             # Skip any audio output during the drain window
             server_content.pop("modelTurn", None)
@@ -343,13 +357,12 @@ class LiveSessionManager:
                     continue
                 # Mark "bot is currently speaking" — used by the audio pump
                 # to drop incoming mic audio for the duration of bot speech
-                # + a short echo-tail window. Each audio frame extends
-                # this. Set to 0.30s — long enough to swallow the
-                # Attendee→Meet→back-to-Attendee echo loop (~150-250ms
-                # round trip) without making real interrupts feel laggy.
-                # When Gemini detects a real interrupt it resets this to
-                # 0 immediately (see server_content.interrupted handler).
-                self._bot_speaking_until = time.monotonic() + 0.30
+                # + an echo-tail window. Each audio frame extends this.
+                # 0.60s is empirically needed to swallow the full
+                # Attendee→Meet→browser→back-to-Attendee echo loop on
+                # noisy connections (300ms was too tight and produced
+                # self-interrupting "my mistake" loops).
+                self._bot_speaking_until = time.monotonic() + 0.60
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:
@@ -557,9 +570,24 @@ class LiveSessionManager:
         except Exception:
             log.exception("_log_transcript: wrapper failed")
 
+        # Stream the partial onto the canvas IMMEDIATELY, throttled to
+        # ~6 Hz per buffer. Without this, the user sees nothing until the
+        # bot finishes a whole turn (the old behavior was "agent done
+        # talking before transcript appears"). The pump's content-digest
+        # cache keeps no-op pushes free, and Attendee silently coalesces
+        # if we somehow exceed its rate limit.
+        now_mono = time.monotonic()
+        last_push = getattr(self, "_last_partial_push", {}).get(buf_key, 0.0)
+        if finished or (now_mono - last_push) >= 0.15:
+            self._push_canvas_now()
+            d = getattr(self, "_last_partial_push", None)
+            if d is None:
+                d = {}
+                self._last_partial_push = d
+            d[buf_key] = now_mono
+
         if finished:
             setattr(self, buf_key, {"text": "", "started_at": None})
-            self._push_canvas_now()
             # Wake the Turn Processor so Haiku can react to the user's
             # finalized utterance. Skip self-utterances (otherwise the bot
             # talking to itself triggers the brain).
