@@ -505,16 +505,15 @@ class LiveSessionManager:
         """
         Gemini Live emits transcript fragments via inputTranscription /
         outputTranscription. Persist them as TranscriptEvent rows tagged
-        `raw.source = "gemini_live"` so the canvas can show the live
-        in-flight utterance (Attendee webhook transcripts arrive only on
-        utterance-finalize, which is too slow for "user is speaking now"
-        feedback).
+        `raw.source = "gemini_live"`. These are the CANONICAL transcripts
+        for the agent loop (we no longer rely on Deepgram via Attendee
+        webhooks — Gemini Live already does STT inline).
 
-        IMPORTANT: the scheduler and turn_processor filter these rows OUT
-        (.exclude(raw__source="gemini_live")) so the agent loop never sees
-        them — Attendee's webhook events are the canonical source for the
-        brain. This is what prevents the "every utterance gets seen twice"
-        bug while keeping live canvas feedback.
+        Scheduler / TurnProcessor / context engine filter rules:
+          - Include `gemini_live` rows where `raw.finished == True`
+            AND `raw.self_utterance != True`. This excludes both
+            in-flight fragments (avoids spamming Haiku on every chunk)
+            and the bot's own speech (avoids the loop-back bug).
         """
         from datetime import datetime as _dt, timezone as _tz
 
@@ -526,6 +525,8 @@ class LiveSessionManager:
         if not buf["started_at"]:
             buf["started_at"] = _dt.now(_tz.utc)
         buf["text"] += text
+
+        is_self = buf_key == "_out_tr_buf"  # outputTranscription = bot's own speech
 
         @sync_to_async
         def _persist():
@@ -541,7 +542,11 @@ class LiveSessionManager:
                         "event_time": buf["started_at"],
                         "speaker": speaker,
                         "text": buf["text"],
-                        "raw": {"finished": finished, "source": "gemini_live"},
+                        "raw": {
+                            "finished": finished,
+                            "source": "gemini_live",
+                            "self_utterance": is_self,
+                        },
                     },
                 )
             except Exception:
@@ -555,6 +560,21 @@ class LiveSessionManager:
         if finished:
             setattr(self, buf_key, {"text": "", "started_at": None})
             self._push_canvas_now()
+            # Wake the Turn Processor so Haiku can react to the user's
+            # finalized utterance. Skip self-utterances (otherwise the bot
+            # talking to itself triggers the brain).
+            if not is_self:
+                try:
+                    from agent.scheduler import maybe_schedule_turn
+
+                    await sync_to_async(maybe_schedule_turn)(
+                        self.bot_id, priority="normal"
+                    )
+                except Exception:
+                    log.exception(
+                        "_log_transcript: maybe_schedule_turn failed bot=%s",
+                        self.bot_id,
+                    )
 
     async def _log_action_create(
         self,

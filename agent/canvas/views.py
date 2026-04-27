@@ -90,14 +90,13 @@ def _snapshot_state(bot_id: str) -> dict:
     from django.db.models import Q
 
     cursor = MeetingCursor.objects.filter(bot_id=bot_id).first()
+    # Show ALL transcript rows on the canvas, including in-flight Gemini Live
+    # fragments — that's what gives the user immediate "I'm being heard"
+    # feedback as they speak. Coalescing of consecutive same-speaker chunks
+    # happens further down. Speaker remap (e.g. "Meeting Agent" → "Clever
+    # Star") is handled by `_display_speaker`.
     events = list(
         TranscriptEvent.objects.filter(bot_id=bot_id)
-        # Attendee webhook is the canonical transcript source. Live STT rows
-        # (raw.source="gemini_live") are kept in the table for debugging but
-        # excluded from canvas display — otherwise every utterance is shown
-        # twice with different speaker labels ("User"+"Callie Schneider",
-        # "Clever Star"+"Meeting Agent").
-        .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
         .order_by("-event_time")[:25]
     )
     events.reverse()

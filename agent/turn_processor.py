@@ -142,16 +142,18 @@ def _process_turn(
             return {"skipped": "cursor advanced"}
 
         # Pull the chunk (inclusive > cursor) — exclude:
-        #   - self-utterances (bot's own TTS played back through mixed audio)
-        #   - gemini_live transcripts (those are display-only; Attendee
-        #     webhooks are the canonical source for the agent loop)
-        # NOTE: JSONField .exclude(key=val) silently drops rows where the key
-        # is absent (NOT NULL == NULL == false). Use null-safe Q filters.
+        #   - self-utterances (bot's own TTS / Gemini outputTranscription)
+        #   - in-flight gemini_live fragments (only finalized utterances feed
+        #     the brain; partials are display-only on the canvas)
         from django.db.models import Q
         qs = (
             TranscriptEvent.objects.filter(bot_id=bot_id)
             .filter(Q(raw__self_utterance__isnull=True) | Q(raw__self_utterance=False))
-            .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
+            .filter(
+                Q(raw__source__isnull=True)
+                | ~Q(raw__source="gemini_live")
+                | Q(raw__finished=True)
+            )
         )
         if cursor.cursor_event_time:
             qs = qs.filter(event_time__gt=cursor.cursor_event_time)

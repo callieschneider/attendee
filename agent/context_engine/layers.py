@@ -209,8 +209,12 @@ def get_recent_transcript(bot_id: str, last_n_events: int = 50) -> list[dict]:
 
     Default is 50 but callers (live_turn, initial_voice_setup) override with a
     much larger value so the conversation history can span the full meeting.
-    Live STT rows (raw.source='gemini_live') are filtered out — Attendee is the
-    canonical transcript source.
+    Includes:
+      - Attendee/Deepgram rows (no `raw.source` set)
+      - Finalized Gemini Live STT (`raw.source='gemini_live'`,
+        `raw.finished=True`); in-flight fragments are excluded.
+    Self-utterances (the bot's own speech) are excluded so the brain does
+    not treat its own output as user input.
     """
     from agent.models import TranscriptEvent
     from django.db.models import Q
@@ -219,7 +223,12 @@ def get_recent_transcript(bot_id: str, last_n_events: int = 50) -> list[dict]:
         return []
     qs = (
         TranscriptEvent.objects.filter(bot_id=bot_id)
-        .filter(Q(raw__source__isnull=True) | ~Q(raw__source="gemini_live"))
+        .filter(Q(raw__self_utterance__isnull=True) | Q(raw__self_utterance=False))
+        .filter(
+            Q(raw__source__isnull=True)
+            | ~Q(raw__source="gemini_live")
+            | Q(raw__finished=True)
+        )
         .order_by("-event_time", "-created_at")[:last_n_events]
     )
     events = list(qs)
