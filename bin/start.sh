@@ -10,7 +10,19 @@ case "$ROLE" in
   web)
     # Auto-run migrations on every web deploy
     python manage.py migrate --noinput
-    exec gunicorn attendee.wsgi --bind "0.0.0.0:${PORT:-8000}" --workers 2 --timeout 120
+    # gthread workers + many threads so long-lived SSE streams from
+    # /agent/canvas/v2/<bot>/stream don't pin a sync worker per client and
+    # block all other requests. Timeout=0 disables the silent-worker reaper
+    # (the SSE loop sends `:hb` heartbeats every 15s, which keeps the
+    # connection alive but counts as silent under the default 30s reaper).
+    exec gunicorn attendee.wsgi \
+      --bind "0.0.0.0:${PORT:-8000}" \
+      --worker-class gthread \
+      --workers 4 \
+      --threads 16 \
+      --timeout 0 \
+      --graceful-timeout 30 \
+      --keep-alive 75
     ;;
   worker)
     # -B runs celery beat inside the same process (no separate service needed).
