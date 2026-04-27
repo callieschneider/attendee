@@ -21,10 +21,13 @@ urlpatterns = [
 
     # Phase 5 live-meeting dashboard
     path("dashboard/", include("agent.dashboard.urls")),
-    # Phase 5 bot canvas — the page Attendee renders as the bot's video feed
-    path("canvas/", include("agent.canvas.urls")),
     # Canvas-rebuild Phase 2: the new multi-tab web app served from Django.
     # Bot's headless Chrome opens this as a second tab (Phase 3) and screenshots
-    # it for the video tile.
+    # it for the video tile. MUST be registered BEFORE `canvas/` because
+    # Django's URL resolver tries prefixes in order — if `canvas/` matches first
+    # and the inner include can't resolve `v2/...`, it 404s instead of falling
+    # through to the next outer pattern.
     path("canvas/v2/", include("agent.canvas_v2.urls")),
+    # Phase 5 bot canvas — the page Attendee renders as the bot's video feed
+    path("canvas/", include("agent.canvas.urls")),
 ]
