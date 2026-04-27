@@ -31,8 +31,16 @@ log = logging.getLogger("agent.canvas.renderer")
 
 
 # Canvas dimensions
+# We draw the layout in 1280×720 design coordinates (kept stable so font
+# sizes and layout math don't have to change), then upscale the final
+# PNG to OUTPUT_WIDTH × OUTPUT_HEIGHT before returning. Attendee's
+# output_image endpoint feeds the bot's virtual webcam — giving it a
+# higher-resolution source means the WebRTC encoder has more headroom
+# and the bot's video looks meaningfully sharper in the meeting.
 _WIDTH = 1280
 _HEIGHT = 720
+OUTPUT_WIDTH = 1920
+OUTPUT_HEIGHT = 1080
 
 # Layout — chat 25% (left), visual 75% (right). Visual is the showpiece.
 TOP_BAR_H = 64
@@ -135,6 +143,12 @@ def render_canvas_png(bot_id: str, use_html_renderer: bool = False) -> bytes:
     # ── Chrome (drawn last so it sits on top) ──────────────────────────────
     _draw_top_bar(draw, state, fonts)
     _draw_bottom_bar(draw, state, fonts)
+
+    # Upscale to OUTPUT_WIDTH × OUTPUT_HEIGHT for a higher-fidelity virtual
+    # webcam feed. LANCZOS preserves edge sharpness on text. Cost is ~10ms
+    # per frame on a 1280→1920 resize, well under the pump cadence.
+    if (OUTPUT_WIDTH, OUTPUT_HEIGHT) != (_WIDTH, _HEIGHT):
+        img = img.resize((OUTPUT_WIDTH, OUTPUT_HEIGHT), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)

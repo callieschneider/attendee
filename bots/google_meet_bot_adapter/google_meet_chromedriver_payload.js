@@ -2271,21 +2271,42 @@ function clickLanguageOption(languageCode) {
     }
 }
 
-function findCameraToggleButton() {
-    // Walk every clickable-ish element and match by any label-bearing
-    // attribute. Google Meet rotates between <button>, <div role="button">,
-    // and sometimes nests an icon span as the click target — so we cast a
-    // wide net.
-    const candidates = Array.from(document.querySelectorAll(
+function _meetButtonCandidates() {
+    return Array.from(document.querySelectorAll(
         'button, div[role="button"], [role="button"], [data-promo-anchor-id]'
     ));
-    const labelOf = el => (
+}
+
+function _meetLabelOf(el) {
+    return (
         el.getAttribute('aria-label') ||
         el.getAttribute('data-tooltip') ||
         el.title ||
         el.textContent ||
         ''
     ).trim().toLowerCase();
+}
+
+function isCameraAlreadyOn() {
+    // Camera is on when we find a button labelled "turn off camera/video"
+    // OR any data-promo-anchor-id="camera-button" with aria-pressed=true.
+    const candidates = _meetButtonCandidates();
+    for (const el of candidates) {
+        const l = _meetLabelOf(el);
+        if (l.startsWith('turn off camera') || l.startsWith('turn off video')) return true;
+        if (el.getAttribute('data-promo-anchor-id') === 'camera-button' &&
+            el.getAttribute('aria-pressed') === 'true') return true;
+    }
+    return false;
+}
+
+function findCameraToggleButton() {
+    // Walk every clickable-ish element and match by any label-bearing
+    // attribute. Google Meet rotates between <button>, <div role="button">,
+    // and sometimes nests an icon span as the click target — so we cast a
+    // wide net.
+    const candidates = _meetButtonCandidates();
+    const labelOf = _meetLabelOf;
     const isOff = el => {
         const ap = el.getAttribute('aria-pressed');
         if (ap === 'false') return true;
@@ -2314,19 +2335,28 @@ function findCameraToggleButton() {
 }
 
 async function turnOnCamera() {
+    // Fast path: camera might already be on (default state on some Meet
+    // builds, or because turnOnMicAndCamera ran in the pre-join screen).
+    // Bail out silently if so — that's the desired end state.
+    if (isCameraAlreadyOn()) {
+        console.log("turnOnCamera: camera already on, skipping");
+        return;
+    }
+
     let cameraButton = null;
     // 80 attempts × 150ms = 12s — Meet's pre-join → in-call transition
     // can take 5-10s on cold starts before the in-call camera button mounts.
     const numAttempts = 80;
     for (let i = 0; i < numAttempts; i++) {
+        // Re-check already-on every iteration: Meet may auto-enable camera
+        // mid-loop, or another piece of code (turnOnMicAndCamera) already
+        // flipped it.
+        if (isCameraAlreadyOn()) {
+            console.log("turnOnCamera: camera came on during retry loop");
+            return;
+        }
         cameraButton = findCameraToggleButton();
         if (cameraButton) break;
-        if (i % 10 === 0) {
-            window.ws.sendJson({
-                type: 'Error',
-                message: `Camera button not found in turnOnCamera (attempt ${i+1}/${numAttempts})`
-            });
-        }
         await new Promise(resolve => setTimeout(resolve, 150));
     }
 
@@ -2337,13 +2367,21 @@ async function turnOnCamera() {
             try { (cameraButton.closest('button') || cameraButton.parentElement).click(); }
             catch (e2) { console.log("Camera click failed", e2); }
         }
-    } else {
-        console.log("Camera button not found after extended retry");
-        window.ws.sendJson({
-            type: 'Error',
-            message: 'Camera button not found in turnOnCamera (gave up)'
-        });
+        return;
     }
+
+    // Final check before declaring failure: if camera is on now, we got
+    // there via some other path (e.g. virtual cam injection) — don't
+    // flag an error.
+    if (isCameraAlreadyOn()) {
+        console.log("turnOnCamera: button never appeared but camera is on — OK");
+        return;
+    }
+    console.log("Camera button not found after extended retry");
+    window.ws.sendJson({
+        type: 'Error',
+        message: 'Camera button not found in turnOnCamera (gave up)'
+    });
 }
 
 function turnOnMic() {
