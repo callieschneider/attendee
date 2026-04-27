@@ -5,8 +5,9 @@ Turns Attendee webhook payloads into durable TranscriptEvent rows
 and ensures a MeetingCursor exists for every active bot.
 
 Called synchronously from `views.attendee_webhook`. Kept fast —
-no LLM calls, no expensive work. The Turn Scheduler
-(`agent.scheduler.maybe_schedule_turn`) decides when to actually process.
+no LLM calls, no expensive work. The real-time Turn Scheduler
+was removed in the canvas-rebuild plan; Gemini Live owns the
+live conversation loop directly via `agent/live_session/`.
 """
 from __future__ import annotations
 
@@ -206,15 +207,16 @@ def ingest_transcript_update(bot_id: str, data: dict) -> dict:
     # "say my name twice" lag).
     _maybe_open_gate_on_address(bot_id, text, speaker=speaker)
 
-    # Fire-and-forget schedule. Gemini Live handles live conversation
-    # natively when the gate is open (low latency, no round-trip through
-    # the Turn Processor). The Turn Processor still runs for actions
-    # (tasks, artifacts, URLs) — but not just to produce a spoken reply
-    # during an active conversation.
-    # region agent log
-    log.warning("DBG68285d A transcript_ingested bot=%s speaker=%r is_self=%s self_utterance_tagged=%s text=%r", bot_id, speaker, is_self, raw_payload.get("self_utterance"), text[:80])
-    # endregion
-    _schedule_turn_safely(bot_id)
+    # The real-time Turn Processor and scheduler were removed (canvas-rebuild
+    # plan, phase 1). Gemini Live now owns the entire conversation loop. We
+    # still ingest webhooks here so transcripts are durable + the audio gate
+    # can be flipped on direct-address — but we no longer enqueue a Celery
+    # task on every utterance.
+    log.warning(
+        "DBG68285d A transcript_ingested bot=%s speaker=%r is_self=%s "
+        "self_utterance_tagged=%s text=%r",
+        bot_id, speaker, is_self, raw_payload.get("self_utterance"), text[:80],
+    )
 
     return {
         "kind": "speech",
@@ -418,17 +420,7 @@ def _extend_gate_safely(bot_id: str, ttl_seconds: int = 30) -> None:
         log.exception("_extend_gate_safely: publish failed bot=%s", bot_id)
 
 
-def _schedule_turn_safely(bot_id: str, priority: str = "normal") -> None:
-    """
-    Best-effort hook to notify the Turn Scheduler that new events exist.
-    Import-lazily so missing pieces during partial rollout don't break ingestion.
-    """
-    try:
-        from agent.scheduler import maybe_schedule_turn
-
-        maybe_schedule_turn(bot_id, priority=priority)
-    except ImportError:
-        # Scheduler not yet loaded — webhook receivers are still useful on their own.
-        pass
-    except Exception:
-        log.exception("_schedule_turn_safely: failed for bot=%s", bot_id)
+# `_schedule_turn_safely` was removed in the canvas-rebuild refactor. The
+# Turn Scheduler / Turn Processor pair no longer exists — Gemini Live owns
+# every live decision. If you arrived here from a stack trace, replace the
+# stale call with nothing; ingestion is end-of-line.

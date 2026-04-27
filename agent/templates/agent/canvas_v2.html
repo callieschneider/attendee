@@ -1,0 +1,511 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1920, initial-scale=1" />
+<title>Clever Star · canvas</title>
+<script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          paper: "#101015",
+          surface: "#15151c",
+          ink: "#e5e7eb",
+          mute: "#9ca3af",
+          line: "#1f2937",
+          accent: "#818cf8",
+          accent2: "#a78bfa",
+          good: "#6ee7b7",
+          warn: "#fbbf24",
+          bad:  "#fca5a5",
+        },
+        fontFamily: {
+          sans: ["Inter","ui-sans-serif","system-ui","-apple-system","Segoe UI","sans-serif"],
+          mono: ["JetBrains Mono","ui-monospace","SFMono-Regular","Menlo","monospace"],
+        },
+      },
+    },
+  };
+</script>
+<link rel="preconnect" href="https://rsms.me/" />
+<link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+<style>
+  html, body, #root { height: 100%; }
+  body { background: #0a0a0c; color: #e5e7eb; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+  /* JetBrains Mono via web fallback */
+  @font-face {
+    font-family: "JetBrains Mono";
+    src: local("JetBrains Mono"), local("Menlo"), local("monospace");
+    font-display: swap;
+  }
+  /* Markdown body styles tuned to the dark theme */
+  .prose-clever {
+    color: #e5e7eb;
+    line-height: 1.65;
+    font-size: 15px;
+  }
+  .prose-clever h1, .prose-clever h2, .prose-clever h3 {
+    color: #f3f4f6;
+    font-weight: 600;
+    margin-top: 1.1em;
+    margin-bottom: 0.5em;
+    line-height: 1.25;
+  }
+  .prose-clever h1 { font-size: 1.45em; }
+  .prose-clever h2 { font-size: 1.2em; }
+  .prose-clever h3 { font-size: 1.05em; }
+  .prose-clever p  { margin: 0.55em 0; }
+  .prose-clever ul, .prose-clever ol { margin: 0.55em 0 0.55em 1.25em; }
+  .prose-clever li { margin: 0.2em 0; }
+  .prose-clever code {
+    background: #1f2937; padding: 0.1em 0.35em; border-radius: 4px;
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.92em;
+  }
+  .prose-clever pre {
+    background: #15151c; border: 1px solid #1f2937; border-radius: 8px;
+    padding: 12px 14px; overflow: auto; margin: 0.7em 0;
+    font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.9em;
+  }
+  .prose-clever blockquote {
+    border-left: 3px solid #818cf8; padding-left: 12px; color: #cbd5e1;
+    margin: 0.6em 0;
+  }
+  .prose-clever a { color: #a5b4fc; text-decoration: underline; }
+  .prose-clever hr { border-color: #1f2937; margin: 1em 0; }
+  .prose-clever table { width: 100%; border-collapse: collapse; margin: 0.7em 0; font-size: 0.95em; }
+  .prose-clever th, .prose-clever td { border-bottom: 1px solid #1f2937; padding: 6px 10px; text-align: left; }
+
+  /* blinking cursor for streaming */
+  .cursor-blink::after {
+    content: "▋"; color: #818cf8; margin-left: 2px; animation: blink 1.05s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* tab underline animation */
+  .tab-active { position: relative; }
+  .tab-active::after {
+    content: ""; position: absolute; left: 8px; right: 8px; bottom: -1px;
+    height: 2px; background: #818cf8; border-radius: 2px;
+    box-shadow: 0 0 12px rgba(129,140,248,0.45);
+  }
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1f2937; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #2b3445; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@18.3.1",
+      "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+      "marked": "https://esm.sh/marked@13.0.3",
+      "htm": "https://esm.sh/htm@3.1.1"
+    }
+  }
+</script>
+
+<script type="module">
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { marked } from "marked";
+import htm from "htm";
+
+const html = htm.bind(React.createElement);
+const BOT_ID = "{{ bot_id|escapejs }}";
+// "?client=bot" is set by the bot when it opens its own canvas tab.
+// Anything else is treated as a real user — we wire up the driving signal.
+const IS_BOT = new URLSearchParams(window.location.search).get("client") === "bot";
+
+// Release driving when the user closes the tab.
+if (!IS_BOT) {
+  window.addEventListener("pagehide", () => {
+    try {
+      navigator.sendBeacon(
+        `/agent/canvas/v2/${BOT_ID}/user-role`,
+        new Blob([JSON.stringify({ driving: false })], { type: "application/json" }),
+      );
+    } catch {}
+  });
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+function md(text) {
+  if (!text) return { __html: "" };
+  try {
+    return { __html: marked.parse(text, { gfm: true, breaks: true }) };
+  } catch (e) {
+    return { __html: "<pre>" + String(text).replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c])) + "</pre>" };
+  }
+}
+function fmtTime(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch { return ""; }
+}
+function relTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const diff = (d.getTime() - Date.now()) / 1000;
+  const abs = Math.abs(diff);
+  if (abs < 60) return diff < 0 ? "just now" : "soon";
+  const mins = Math.round(diff / 60);
+  if (Math.abs(mins) < 60) return mins < 0 ? `${-mins}m ago` : `in ${mins}m`;
+  const hours = Math.round(mins / 60);
+  if (Math.abs(hours) < 48) return hours < 0 ? `${-hours}h ago` : `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return days < 0 ? `${-days}d ago` : `in ${days}d`;
+}
+
+const TABS = [
+  { id: "dashboard", label: "Dashboard" },
+  { id: "notes",     label: "Notes" },
+  { id: "tasks",     label: "Tasks" },
+  { id: "focus",     label: "Focus" },
+  { id: "debug",     label: "Debug" },
+];
+
+// ── status pill ────────────────────────────────────────────────────────────
+function StatusPill({ voice, userDriving }) {
+  let label = "Idle", dot = "bg-mute", ring = "ring-mute/30";
+  if (voice?.suspended) {
+    label = "Asleep"; dot = "bg-mute"; ring = "ring-mute/30";
+  } else if (voice?.gate_open) {
+    label = "Listening"; dot = "bg-good"; ring = "ring-good/30";
+  } else if (voice?.label === "speaking") {
+    label = "Speaking"; dot = "bg-accent"; ring = "ring-accent/30";
+  }
+  return html`
+    <div class="flex items-center gap-3">
+      ${userDriving ? html`
+        <div class="text-[11px] uppercase tracking-wider text-warn flex items-center gap-1.5">
+          <span class="w-1.5 h-1.5 rounded-full bg-warn animate-pulse"></span>User driving
+        </div>` : null}
+      <div class=${"flex items-center gap-2 px-3 py-1 rounded-full ring-1 " + ring + " bg-paper/60"}>
+        <span class=${"w-2 h-2 rounded-full " + dot + " animate-pulse"}></span>
+        <span class="text-xs font-medium text-ink">${label}</span>
+      </div>
+    </div>
+  `;
+}
+
+// ── tab bar ────────────────────────────────────────────────────────────────
+function TabBar({ active, onPick }) {
+  return html`
+    <div class="flex items-center gap-1 px-1">
+      ${TABS.map(t => html`
+        <button
+          key=${t.id}
+          onClick=${() => onPick(t.id)}
+          class=${"px-3 py-2 text-sm rounded-md transition-colors " +
+            (t.id === active
+              ? "text-ink tab-active"
+              : "text-mute hover:text-ink hover:bg-surface/60")}>
+          ${t.label}
+        </button>`)}
+    </div>
+  `;
+}
+
+// ── tab views ──────────────────────────────────────────────────────────────
+function Dashboard({ snapshot }) {
+  const dash = snapshot.dashboard || {};
+  const tasks = snapshot.tasks || [];
+  const focus = snapshot.focus || {};
+  return html`
+    <div class="grid grid-cols-12 gap-4 p-6">
+      <div class="col-span-12 lg:col-span-8 bg-paper border border-line rounded-xl p-5">
+        <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-2">Now thinking</div>
+        ${focus.text
+          ? html`<div class="prose-clever max-h-[260px] overflow-y-auto" dangerouslySetInnerHTML=${md(focus.text)}></div>`
+          : html`<div class="text-sm text-mute italic">Nothing on the focus tab yet — ask the agent to think about something.</div>`}
+      </div>
+      <div class="col-span-12 lg:col-span-4 grid grid-cols-1 gap-4">
+        <div class="bg-paper border border-line rounded-xl p-5">
+          <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-3">Series</div>
+          <div class="text-base font-medium text-ink truncate">${snapshot.series?.title || "—"}</div>
+        </div>
+        <div class="bg-paper border border-line rounded-xl p-5">
+          <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-3">Open tasks</div>
+          <div class="text-3xl font-semibold text-ink">${tasks.length}</div>
+          <div class="text-xs text-mute mt-1">${tasks.filter(t => t.priority === "high" || t.priority === "critical").length} high priority</div>
+        </div>
+      </div>
+      <div class="col-span-12 bg-paper border border-line rounded-xl p-5">
+        <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-3">Recent notes</div>
+        ${snapshot.notes_md
+          ? html`<div class="prose-clever max-h-[220px] overflow-y-auto" dangerouslySetInnerHTML=${md(snapshot.notes_md.slice(-3000))}></div>`
+          : html`<div class="text-sm text-mute italic">No notes yet — agent will write here as the meeting unfolds.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function Notes({ snapshot }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [snapshot.notes_md]);
+  return html`
+    <div class="p-6 h-full flex flex-col">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-medium text-ink">Meeting Notes</h2>
+        <span class="text-[11px] uppercase tracking-[0.12em] text-mute">live · agent-written</span>
+      </div>
+      <div ref=${ref} class="flex-1 overflow-y-auto bg-paper border border-line rounded-xl p-6">
+        ${snapshot.notes_md
+          ? html`<div class="prose-clever" dangerouslySetInnerHTML=${md(snapshot.notes_md)}></div>`
+          : html`<div class="text-sm text-mute italic">Empty. Agent will append notes here.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function priorityClass(p) {
+  return ({
+    critical: "bg-bad/15 text-bad ring-bad/30",
+    high:     "bg-warn/15 text-warn ring-warn/30",
+    medium:   "bg-accent/15 text-accent ring-accent/30",
+    low:      "bg-surface text-mute ring-line",
+  })[p] || "bg-surface text-mute ring-line";
+}
+function statusClass(s) {
+  return ({
+    todo:        "bg-surface text-mute ring-line",
+    in_progress: "bg-accent/15 text-accent ring-accent/30",
+    in_review:   "bg-accent2/15 text-accent2 ring-accent2/30",
+    backlog:     "bg-surface text-mute ring-line",
+    done:        "bg-good/10 text-good ring-good/20",
+    cancelled:   "bg-surface text-mute ring-line",
+  })[s] || "bg-surface text-mute ring-line";
+}
+
+function Tasks({ snapshot }) {
+  const tasks = snapshot.tasks || [];
+  return html`
+    <div class="p-6 h-full flex flex-col">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-medium text-ink">Open Tasks</h2>
+        <span class="text-[11px] uppercase tracking-[0.12em] text-mute">${tasks.length} open</span>
+      </div>
+      <div class="flex-1 overflow-y-auto">
+        ${tasks.length === 0
+          ? html`<div class="text-sm text-mute italic p-6 text-center bg-paper border border-line rounded-xl">No open tasks for this series.</div>`
+          : tasks.map(t => html`
+            <div key=${t.id} class="bg-paper border border-line rounded-xl p-4 mb-3 flex items-start gap-3">
+              <div class="flex-1 min-w-0">
+                <div class="text-[15px] font-medium text-ink leading-snug">${t.title}</div>
+                <div class="mt-2 flex items-center gap-2 text-[11px]">
+                  <span class=${"px-2 py-0.5 rounded-full ring-1 capitalize " + statusClass(t.status)}>${t.status.replace("_"," ")}</span>
+                  <span class=${"px-2 py-0.5 rounded-full ring-1 capitalize " + priorityClass(t.priority)}>${t.priority}</span>
+                  ${t.owner ? html`<span class="text-mute">· ${t.owner}</span>` : null}
+                  ${t.due_date ? html`<span class="text-mute">· due ${relTime(t.due_date)}</span>` : null}
+                </div>
+              </div>
+            </div>`)}
+      </div>
+    </div>
+  `;
+}
+
+function Focus({ snapshot }) {
+  const ref = useRef(null);
+  const focus = snapshot.focus || {};
+  useEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [focus.text]);
+  return html`
+    <div class="p-6 h-full flex flex-col">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-medium text-ink">Focus</h2>
+        <span class="text-[11px] uppercase tracking-[0.12em] text-mute">
+          ${focus.session_id ? (focus.done ? "complete" : "thinking…") : "idle"}
+        </span>
+      </div>
+      <div ref=${ref} class="flex-1 overflow-y-auto bg-paper border border-line rounded-xl p-6 prose-clever">
+        ${focus.text
+          ? html`<div class=${focus.done ? "" : "cursor-blink"} dangerouslySetInnerHTML=${md(focus.text)}></div>`
+          : html`<div class="text-sm text-mute italic">When the agent uses think_deep, the streamed answer appears here.</div>`}
+      </div>
+    </div>
+  `;
+}
+
+function Debug({ snapshot }) {
+  const tx = snapshot.transcript || [];
+  const ax = snapshot.action_log || [];
+  return html`
+    <div class="grid grid-cols-12 gap-4 p-6 h-full">
+      <div class="col-span-12 lg:col-span-7 bg-paper border border-line rounded-xl p-4 overflow-hidden flex flex-col">
+        <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-2">Transcript</div>
+        <div class="flex-1 overflow-y-auto font-mono text-[12px] space-y-1">
+          ${tx.map((e,i) => html`
+            <div key=${i} class=${"flex gap-2 " + (e.is_self ? "text-accent" : "text-ink")}>
+              <span class="text-mute shrink-0">${fmtTime(e.t)}</span>
+              <span class="text-mute shrink-0">${(e.speaker||"?").slice(0,14)}</span>
+              <span class="break-words">${e.text}</span>
+            </div>`)}
+        </div>
+      </div>
+      <div class="col-span-12 lg:col-span-5 bg-paper border border-line rounded-xl p-4 overflow-hidden flex flex-col">
+        <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-2">Action log</div>
+        <div class="flex-1 overflow-y-auto font-mono text-[12px] space-y-1">
+          ${ax.map((a,i) => html`
+            <div key=${i} class="flex gap-2">
+              <span class="text-mute shrink-0">${fmtTime(a.t)}</span>
+              <span class=${"shrink-0 " + (a.status === "ok" ? "text-good" : a.status === "error" ? "text-bad" : "text-warn")}>${a.status}</span>
+              <span class="text-ink shrink-0">${a.tool}</span>
+              ${a.latency_ms != null ? html`<span class="text-mute">${a.latency_ms}ms</span>` : null}
+              ${a.error ? html`<span class="text-bad break-words">${a.error}</span>` : null}
+            </div>`)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ── main shell ─────────────────────────────────────────────────────────────
+function App() {
+  const [snap, setSnap] = useState(null);
+  const [connected, setConnected] = useState(false);
+  const [focusBuffer, setFocusBuffer] = useState({}); // {tab: {session_id, text}}
+
+  useEffect(() => {
+    let cancelled = false;
+    async function bootstrap() {
+      try {
+        const r = await fetch(`/agent/canvas/v2/${BOT_ID}/state.json`, { cache: "no-store" });
+        if (!cancelled && r.ok) setSnap(await r.json());
+      } catch (e) { console.error("snapshot fetch", e); }
+    }
+    bootstrap();
+
+    const es = new EventSource(`/agent/canvas/v2/${BOT_ID}/stream`);
+    es.onopen  = () => setConnected(true);
+    es.onerror = () => setConnected(false);
+
+    es.addEventListener("snapshot", ev => {
+      try { setSnap(JSON.parse(ev.data)); } catch {}
+    });
+
+    es.addEventListener("state", ev => {
+      let payload; try { payload = JSON.parse(ev.data); } catch { return; }
+      const evt = payload?.data || {};
+      setSnap(prev => {
+        if (!prev) return prev;
+        const next = { ...prev };
+        if (evt.event === "navigate" && evt.tab) next.active_tab = evt.tab;
+        if (evt.event === "notes") {
+          if (evt.operation === "replace") next.notes_md = evt.text;
+          else next.notes_md = (prev.notes_md || "") + (prev.notes_md ? "\n\n" : "") + evt.text;
+        }
+        if (evt.event === "dashboard") next.dashboard = { ...(prev.dashboard||{}), ...(evt.payload||{}) };
+        if (evt.event === "focus") {
+          next.focus = { ...(prev.focus||{}), session_id: evt.session_id, done: !!evt.done };
+          if (evt.tab) next.active_tab = evt.tab;
+        }
+        if (evt.event === "user_driving") next.user_driving = !!evt.driving;
+        return next;
+      });
+    });
+
+    es.addEventListener("stream", ev => {
+      let payload; try { payload = JSON.parse(ev.data); } catch { return; }
+      const tab = payload.tab || "focus";
+      const data = payload.data || {};
+      if (tab === "focus") {
+        setSnap(prev => {
+          if (!prev) return prev;
+          if (data.event === "start") {
+            return {
+              ...prev,
+              focus: { session_id: data.session_id, text: "", done: false },
+              active_tab: prev.user_driving ? prev.active_tab : "focus",
+            };
+          }
+          if (data.event === "delta") {
+            return {
+              ...prev,
+              focus: { ...(prev.focus||{}), session_id: data.session_id, text: data.text || "", done: false },
+            };
+          }
+          if (data.event === "done") {
+            return {
+              ...prev,
+              focus: { ...(prev.focus||{}), session_id: data.session_id, text: data.text || prev.focus?.text || "", done: true },
+            };
+          }
+          return prev;
+        });
+      }
+    });
+
+    return () => { cancelled = true; es.close(); };
+  }, []);
+
+  const active = snap?.active_tab || "dashboard";
+  const onPick = (tab) => {
+    setSnap(prev => prev ? { ...prev, active_tab: tab } : prev);
+    if (!IS_BOT) {
+      fetch(`/agent/canvas/v2/${BOT_ID}/user-role`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ driving: true }),
+      }).catch(() => {});
+    }
+    fetch(`/agent/canvas/v2/${BOT_ID}/navigate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tab }),
+    }).catch(() => {});
+  };
+
+  if (!snap) {
+    return html`
+      <div class="h-full flex items-center justify-center text-mute text-sm">
+        Connecting to canvas…
+      </div>`;
+  }
+
+  let body;
+  switch (active) {
+    case "notes":     body = html`<${Notes}     snapshot=${snap}/>`; break;
+    case "tasks":     body = html`<${Tasks}     snapshot=${snap}/>`; break;
+    case "focus":     body = html`<${Focus}     snapshot=${snap}/>`; break;
+    case "debug":     body = html`<${Debug}     snapshot=${snap}/>`; break;
+    default:          body = html`<${Dashboard} snapshot=${snap}/>`; break;
+  }
+
+  return html`
+    <div class="h-full flex flex-col">
+      <header class="border-b border-line bg-paper/80 backdrop-blur">
+        <div class="flex items-center justify-between px-6 py-3">
+          <div class="flex items-center gap-3">
+            <div class="w-7 h-7 rounded-md bg-gradient-to-br from-accent to-accent2 flex items-center justify-center">
+              <span class="text-[11px] font-bold text-paper">CS</span>
+            </div>
+            <div class="leading-tight">
+              <div class="text-[15px] font-semibold tracking-tight">${snap.agent_name || "Clever Star"}</div>
+              <div class="text-[11px] text-mute font-mono">bot ${BOT_ID.slice(0,8)} · ${connected ? "live" : "reconnecting…"}</div>
+            </div>
+          </div>
+          <${StatusPill} voice=${snap.voice} userDriving=${snap.user_driving}/>
+        </div>
+        <${TabBar} active=${active} onPick=${onPick}/>
+      </header>
+      <main class="flex-1 overflow-hidden">${body}</main>
+    </div>
+  `;
+}
+
+createRoot(document.getElementById("root")).render(html`<${App}/>`);
+</script>
+</body>
+</html>

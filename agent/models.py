@@ -594,6 +594,77 @@ class VoiceContextPush(models.Model):
         return f"{self.bot_id} @ {self.created_at:%H:%M:%S}: {self.text[:60]}"
 
 
+class CanvasState(models.Model):
+    """
+    Per-bot UI state for the multi-tab canvas web app.
+
+    The canvas (Next.js / browser) reads this to render the dashboard, notes,
+    tasks list, focus stream, and debug view. The agent writes to it via the
+    `navigate_canvas`, `update_notes`, `update_dashboard`, and `think_deep`
+    tools. Real-time fan-out to connected canvas clients happens via Redis
+    pubsub (`canvas:state:{bot_id}` and `canvas:stream:{bot_id}:{tab}`); this
+    model is the durable / late-join snapshot.
+
+    Single row per active bot. Safe to leave around after a meeting ends —
+    the canvas just goes stale.
+    """
+
+    TAB_DASHBOARD = "dashboard"
+    TAB_NOTES = "notes"
+    TAB_TASKS = "tasks"
+    TAB_FOCUS = "focus"
+    TAB_DEBUG = "debug"
+    TAB_CHOICES = [
+        (TAB_DASHBOARD, "Dashboard"),
+        (TAB_NOTES, "Notes"),
+        (TAB_TASKS, "Tasks"),
+        (TAB_FOCUS, "Focus"),
+        (TAB_DEBUG, "Debug"),
+    ]
+
+    bot = models.OneToOneField(
+        "bots.Bot",
+        to_field="object_id",
+        primary_key=True,
+        on_delete=models.CASCADE,
+        related_name="canvas_state",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    active_tab = models.CharField(
+        max_length=16,
+        choices=TAB_CHOICES,
+        default=TAB_DASHBOARD,
+    )
+
+    # Markdown body of the agent's running notes for this meeting. Append-only
+    # by convention; the agent uses `update_notes` to mutate it.
+    notes_md = models.TextField(blank=True, default="")
+
+    # Identifier of the most recent `think_deep` streaming session. The canvas
+    # focus tab subscribes to `canvas:stream:<bot_id>:focus` and matches by
+    # session_id so a stale stream doesn't overwrite a fresh one.
+    focus_session_id = models.CharField(max_length=64, blank=True, default="")
+    focus_text = models.TextField(blank=True, default="")
+    focus_done = models.BooleanField(default=True)
+
+    # Free-form JSON the agent populates for the dashboard cards.
+    dashboard_payload = models.JSONField(default=dict, blank=True)
+
+    # When a non-bot WS client (the user's own browser) is connected the agent
+    # treats canvas navigation as user-driven and stops auto-switching tabs.
+    user_driving = models.BooleanField(default=False)
+    user_driving_since = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "agent_canvas_state"
+        verbose_name = "Canvas State"
+
+    def __str__(self):
+        return f"canvas bot={self.bot_id} tab={self.active_tab}"
+
+
 class MeetingCursor(models.Model):
     """
     Live meeting state snapshot — one row per active bot.

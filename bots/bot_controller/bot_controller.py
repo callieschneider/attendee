@@ -1078,6 +1078,101 @@ class BotController:
             logger.warning(f"Error playing video media request: {e}")
             BotMediaRequestManager.set_media_request_failed_to_play(oldest_enqueued_media_request)
 
+    def _open_canvas_tab_for_present_mode_safely(self):
+        """
+        Open the canvas web app as a second tab in the bot's Chrome.
+
+        Why: Phase 4 (Present mode) shares a tab via getDisplayMedia. For Meet's
+        tab-picker to see the canvas, it has to be a real tab in this Chrome
+        instance. The bot continues to drive the Meet tab; the canvas tab just
+        sits there in the background until `screen_share_canvas` triggers a
+        Present-now click.
+
+        Best-effort and silent: a failure here must NEVER break the meeting.
+        """
+        try:
+            from django.conf import settings
+            api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
+            if not api_base:
+                logger.info("canvas_tab: AGENT_APP_URL not set; skipping")
+                return
+            adapter = getattr(self, "adapter", None)
+            driver = getattr(adapter, "driver", None) if adapter else None
+            if driver is None:
+                logger.info("canvas_tab: adapter has no driver; skipping")
+                return
+            bot_id = self.bot_in_db.object_id
+            # ?client=bot lets the canvas distinguish bot from user opens.
+            # The user-driving indicator only triggers for non-bot clients.
+            url = f"{api_base}/agent/canvas/v2/{bot_id}/?client=bot"
+            current_handle = driver.current_window_handle
+            driver.execute_script(
+                "window.open(arguments[0], '_blank', 'noopener');", url,
+            )
+            # Stay focused on the Meet tab — the canvas tab just sits there.
+            driver.switch_to.window(current_handle)
+            logger.info("canvas_tab: opened canvas tab url=%s bot=%s", url, bot_id)
+        except Exception as e:
+            logger.warning("canvas_tab: open failed (non-fatal): %s", e)
+
+    def _toggle_canvas_screenshare(self, on: bool):
+        """
+        Phase 4: drive Meet's "Share screen" / "Stop presenting" button.
+
+        Approach: switch the chromedriver to the Meet tab, run a small JS
+        helper that finds the share-screen button by aria-label and clicks
+        it. Chrome's --auto-select-desktop-capture-source flag picks the
+        canvas tab automatically when getDisplayMedia fires, so no UI dialog
+        is needed.
+
+        This is best-effort. Non-fatal on any error.
+        """
+        try:
+            adapter = getattr(self, "adapter", None)
+            driver = getattr(adapter, "driver", None) if adapter else None
+            if driver is None:
+                logger.info("canvas_share: adapter has no driver; skipping")
+                return
+
+            # Locate the Meet tab by URL prefix.
+            meet_handle = None
+            for handle in driver.window_handles:
+                try:
+                    driver.switch_to.window(handle)
+                    if "meet.google.com" in (driver.current_url or ""):
+                        meet_handle = handle
+                        break
+                except Exception:
+                    continue
+            if meet_handle is None:
+                logger.warning("canvas_share: no Meet tab found")
+                return
+
+            driver.switch_to.window(meet_handle)
+
+            if on:
+                js = """
+                    const labels = ["Present now", "Share screen", "Share now", "Présenter maintenant"];
+                    for (const l of labels) {
+                        const btn = document.querySelector(`button[aria-label*="${l}" i]`);
+                        if (btn) { btn.click(); return l; }
+                    }
+                    return null;
+                """
+            else:
+                js = """
+                    const labels = ["Stop presenting", "Stop sharing", "Stop sharing screen"];
+                    for (const l of labels) {
+                        const btn = document.querySelector(`button[aria-label*="${l}" i]`);
+                        if (btn) { btn.click(); return l; }
+                    }
+                    return null;
+                """
+            result = driver.execute_script(js)
+            logger.info("canvas_share: toggled on=%s result=%s", on, result)
+        except Exception as e:
+            logger.warning("canvas_share: toggle failed (non-fatal): %s", e)
+
     def take_action_based_on_chat_message_requests_in_db(self):
         if not self.adapter.is_ready_to_send_chat_messages():
             logger.info("Bot adapter is not ready to send chat messages, so not sending chat message requests")
@@ -1173,6 +1268,16 @@ class BotController:
                 logger.info(f"Changing gallery view page for bot {self.bot_in_db.object_id}. Command: {command}")
                 self.bot_in_db.refresh_from_db()
                 self.change_gallery_view_page(next_page=(command == "change_gallery_view_page_next"))
+            elif command == "start_canvas_screenshare":
+                # Canvas-rebuild Phase 4: trigger Meet's "Share screen" button.
+                # Chrome's --auto-select-desktop-capture-source flag picks
+                # the canvas tab automatically, so the bot ends up sharing
+                # its own canvas without any UI dialog.
+                logger.info(f"Starting canvas screenshare for bot {self.bot_in_db.object_id}")
+                self._toggle_canvas_screenshare(on=True)
+            elif command == "stop_canvas_screenshare":
+                logger.info(f"Stopping canvas screenshare for bot {self.bot_in_db.object_id}")
+                self._toggle_canvas_screenshare(on=False)
             else:
                 logger.info(f"Unknown command: {command}")
 
@@ -1997,6 +2102,12 @@ class BotController:
                 bot=self.bot_in_db,
                 event_type=BotEventTypes.BOT_RECORDING_PERMISSION_GRANTED,
             )
+
+            # Canvas-rebuild Phase 3/4: open the canvas web app as a second
+            # Chrome tab in the bot's browser. Required for Phase 4 Present-
+            # mode screen sharing (the tab has to exist in this Chrome
+            # instance for getDisplayMedia / Meet's tab-picker to see it).
+            self._open_canvas_tab_for_present_mode_safely()
             return
 
         if message.get("message") == BotAdapter.Messages.BOT_RECORDING_PERMISSION_DENIED:

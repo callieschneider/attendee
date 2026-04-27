@@ -23,4 +23,8 @@ urlpatterns = [
     path("dashboard/", include("agent.dashboard.urls")),
     # Phase 5 bot canvas — the page Attendee renders as the bot's video feed
     path("canvas/", include("agent.canvas.urls")),
+    # Canvas-rebuild Phase 2: the new multi-tab web app served from Django.
+    # Bot's headless Chrome opens this as a second tab (Phase 3) and screenshots
+    # it for the video tile.
+    path("canvas/v2/", include("agent.canvas_v2.urls")),
 ]

@@ -2,8 +2,8 @@
 Agent Celery tasks.
 - process_finished_meeting: triggered when a bot reaches state=ended
 - embed_entity_async: background embedding for any entity
-- process_meeting_turn: (Phase 5) re-exported from agent.turn_processor so
-  Celery's autodiscover picks it up via the `agent.tasks` module path.
+- summarize_meeting_after_leave: post-meeting summarizer (re-exported so
+  Celery's autodiscover picks it up via the `agent.tasks` module path).
 """
 import logging
 import uuid
@@ -11,8 +11,8 @@ import uuid
 from celery import shared_task
 from django.utils import timezone
 
-# Re-export Phase 5 background tasks so Celery's autodiscover finds them.
-from agent.turn_processor import process_meeting_turn  # noqa: F401
+# Re-export so Celery autodiscover finds them.
+from agent.turn_processor import summarize_meeting_after_leave  # noqa: F401
 from agent.canvas.pump import push_canvas_images  # noqa: F401
 
 log = logging.getLogger("agent.tasks")

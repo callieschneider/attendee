@@ -1,9 +1,18 @@
 """
-Visual tools — write a visual spec into an Artifact row with type=chart.
-The canvas pump (Celery beat task `agent.canvas.pump.push_canvas_images`,
-running every ~1s) renders these to PNG and POSTs them to Attendee. We
-also kick a synchronous one-shot pump on the worker so the new visual
-appears within ~50ms instead of waiting for the next tick.
+Chart-only visual tool.
+
+Phase 2 of the canvas-rebuild plan retired the 8-spec visual system
+(list / text / table / html / etc). The canvas web app now renders
+markdown notes, focus content, and dashboards natively, so the only
+remaining job for this module is genuine data visualisations: bar /
+line / pie / KPI / flow charts.
+
+The chart still lands as an Artifact row with type=chart; the dashboard
+tab of the canvas web app picks it up and renders it.
+
+For everything that ISN'T a chart (explanations, notes, lists, free-
+form text), use `think_deep` (smart streaming text into the focus tab),
+`update_notes`, or `navigate_canvas` instead.
 """
 from __future__ import annotations
 
@@ -15,8 +24,10 @@ from .types import ToolDefinition, ToolSchema
 log = logging.getLogger("agent.tools.visual")
 
 
+_VALID_CHART_TYPES = ("bar", "line", "pie", "kpi", "flow")
+
+
 def _coerce_spec(spec) -> dict | None:
-    """Accept spec as either a dict or a JSON-encoded string."""
     if isinstance(spec, dict):
         return spec
     if isinstance(spec, str) and spec.strip():
@@ -29,6 +40,7 @@ def _coerce_spec(spec) -> dict | None:
 
 
 def _create_visual(inp: dict, ctx: dict) -> dict:
+    from agent.canvas_v2 import state as canvas_state
     from agent.models import Artifact
 
     from ._series_fallback import ensure_series_id
@@ -36,74 +48,82 @@ def _create_visual(inp: dict, ctx: dict) -> dict:
     spec = _coerce_spec(inp.get("spec"))
     if spec is None:
         return {"error": "spec must be an object or a JSON string"}
-    title = (inp.get("title") or "Visual").strip()
-    series_id = ensure_series_id(inp, ctx)
+    chart_type = (spec.get("type") or "").strip().lower()
+    if chart_type not in _VALID_CHART_TYPES:
+        return {
+            "error": (
+                f"Unsupported chart type {chart_type!r}. Allowed: "
+                f"{', '.join(_VALID_CHART_TYPES)}. For non-chart visuals "
+                f"(explanations, notes, lists, text), call think_deep, "
+                f"update_notes, or navigate_canvas instead."
+            ),
+        }
 
-    # region agent log
-    log.warning("DBG68285d D create_visual series=%s ctx_series=%s bot=%s spec_type=%s",
-        series_id, ctx.get("series_id"), ctx.get("bot_id"), spec.get("type") if isinstance(spec, dict) else "?")
-    # endregion
+    title = (inp.get("title") or "Chart").strip()
+    series_id = ensure_series_id(inp, ctx)
 
     try:
         artifact = Artifact.objects.create(
             series_id=series_id,
             title=title[:255],
             type="chart",
-            content=json.dumps(spec)[:50000],  # generous limit for HTML
+            content=json.dumps(spec)[:50000],
         )
     except Exception as exc:
         log.exception("create_visual: failed")
         return {"error": f"{type(exc).__name__}: {exc}"}
 
-    _kick_canvas_pump(ctx.get("bot_id"))
+    bot_id = ctx.get("bot_id")
+    if bot_id:
+        try:
+            canvas_state.update_dashboard(
+                bot_id,
+                {
+                    "latest_chart": {
+                        "id": str(artifact.id),
+                        "title": title,
+                        "spec": spec,
+                    },
+                },
+            )
+            canvas_state.navigate(bot_id, "dashboard", source="agent")
+        except Exception:
+            log.exception("create_visual: canvas_state push failed bot=%s", bot_id)
 
     return {
         "success": True,
         "visual_id": str(artifact.id),
         "title": title,
-        "message": "Visual queued — appears on the bot's tile within ~1 second.",
+        "message": "Chart created — visible on the dashboard tab.",
     }
 
 
-def _kick_canvas_pump(bot_id: str | None) -> None:
-    """Trigger an immediate one-shot canvas render+push for this bot.
-    Best-effort — never raises. The Celery beat pump runs every ~1s anyway,
-    this just shaves the worst-case wait."""
-    if not bot_id:
-        return
-    try:
-        from agent.canvas.pump import push_canvas_images_for_bot
-
-        push_canvas_images_for_bot(bot_id)
-    except Exception:
-        log.exception("_kick_canvas_pump: failed bot=%s", bot_id)
-
-
 def _update_visual(inp: dict, ctx: dict) -> dict:
-    """
-    Update an existing visual. Robust to hallucinated IDs: if the given
-    ID doesn't exist, falls back to updating the most-recent visual for
-    the series. If there's no visual at all, creates a new one.
-    """
+    from agent.canvas_v2 import state as canvas_state
     from agent.models import Artifact
 
     spec = _coerce_spec(inp.get("spec"))
     if spec is None:
         return {"error": "spec must be an object or a JSON string"}
-    visual_id = inp.get("visual_id")
+    chart_type = (spec.get("type") or "").strip().lower()
+    if chart_type not in _VALID_CHART_TYPES:
+        return {
+            "error": (
+                f"Unsupported chart type {chart_type!r}. Allowed: "
+                f"{', '.join(_VALID_CHART_TYPES)}."
+            ),
+        }
 
+    visual_id = inp.get("visual_id")
     artifact = None
     if visual_id:
         try:
             artifact = Artifact.objects.get(id=visual_id, type="chart")
         except (Artifact.DoesNotExist, ValueError):
-            log.info("update_visual: id %s not found, falling back to latest", visual_id)
             artifact = None
 
     if artifact is None:
-        # Find the most recent chart for this bot's series
         from ._series_fallback import ensure_series_id
-
         series_id = ensure_series_id(inp, ctx)
         artifact = (
             Artifact.objects.filter(type="chart", series_id=series_id, is_deleted=False)
@@ -112,56 +132,48 @@ def _update_visual(inp: dict, ctx: dict) -> dict:
         )
 
     if artifact is None:
-        # No existing visual — create one
-        return _create_visual({"spec": spec, "title": inp.get("title", "Visual")}, ctx)
+        return _create_visual({"spec": spec, "title": inp.get("title", "Chart")}, ctx)
 
     artifact.content = json.dumps(spec)[:50000]
     if inp.get("title"):
         artifact.title = inp["title"][:255]
     artifact.save(update_fields=["content", "title", "updated_at"])
 
-    _kick_canvas_pump(ctx.get("bot_id"))
+    bot_id = ctx.get("bot_id")
+    if bot_id:
+        try:
+            canvas_state.update_dashboard(
+                bot_id,
+                {
+                    "latest_chart": {
+                        "id": str(artifact.id),
+                        "title": artifact.title,
+                        "spec": spec,
+                    },
+                },
+            )
+        except Exception:
+            log.exception("update_visual: canvas_state push failed bot=%s", bot_id)
 
     return {
         "success": True,
         "updated": True,
         "visual_id": str(artifact.id),
-        "message": "Visual updated — re-renders within ~1 second.",
+        "message": "Chart updated.",
     }
 
 
 _SPEC_DESCRIPTION = (
-    "JSON spec describing what to render on the bot's video tile. STRONGLY PREFER simple\n"
-    "server-rendered shapes — they appear in <500ms. The `html` shape is a last-resort\n"
-    "fallback for genuinely custom layouts and adds 2-5s of headless-Chrome overhead.\n"
+    "JSON spec describing the chart. ONLY use for genuine data visualisations.\n"
+    "For explanations, notes, lists, or free-form text use `think_deep`,\n"
+    "`update_notes`, or `navigate_canvas` instead.\n"
     "\n"
-    "FAST shapes (use these for ~95% of cases):\n"
-    '  - {"type":"list","items":["foo","bar", ...]}                     — bullet list. Items support **bold**, *italic*, `code`.\n'
-    '  - {"type":"text","text":"# Heading\\n**bold** and *italic*..."}    — text card. Supports markdown headings, lists, bold/italic/code, plus simple HTML (<b>/<i>/<code>/<br>/<p>/<h1-3>/<ul>/<ol>/<li>).\n'
-    '  - {"type":"table","rows":[["Name","Status"],["Foo","OK"], ...]}  — first row is header. Up to 18 rows, 8 cols.\n'
-    "\n"
-    "DATA VISUALIZATIONS (use when the user asks for a chart/graph/diagram):\n"
+    'Allowed shapes:\n'
     '  - {"type":"bar","data":[{"label":"Q1","value":120}, ...]}                         — bar chart, ≤12 bars\n'
-    '  - {"type":"line","series":[{"label":"Revenue","data":[{"x":"Jan","y":100}, ...]}]} — line chart, up to 4 series, points share x-axis\n'
-    '  - {"type":"pie","data":[{"label":"iOS","value":60},{"label":"Android","value":40}]} — pie chart with legend, ≤8 slices (rest groups into "Other")\n'
-    '  - {"type":"kpi","items":[{"label":"MRR","value":"$42k","delta":"+8%","delta_dir":"up"}, ...]} — big-number KPI cards, ≤8 items. delta_dir is "up"/"down" for green/red arrow\n'
-    '  - {"type":"flow","nodes":[{"id":"a","label":"Discover"},{"id":"b","label":"Build"}],"edges":[{"from":"a","to":"b"}]} — simple flowchart/diagram, ≤6 nodes\n'
-    "\n"
-    "SLOW shape (only when nothing above can express what was asked):\n"
-    '  - {"type":"html","html":"<!DOCTYPE html><html>...</html>","title":"..."}\n'
-    "      Full self-contained HTML page (inline CSS+SVG, no JS, no external resources).\n"
-    "      Theme: dark bg #0a0b0f, light text #e5e7eb, accent #a5b4fc.\n"
-    "      DO NOT compose long HTML inside this arg yourself; if you go this route,\n"
-    "      first call `call_model` to draft the HTML, then pass it here.\n"
-    "\n"
-    "Keep data small (≤12 items). Always include a `type` field. Picking the right type:\n"
-    "  • 'show me 5 bullet points / a list of X' → list\n"
-    "  • 'show a chart of revenue by quarter'    → bar\n"
-    "  • 'plot X over time / show the trend'     → line\n"
-    "  • 'breakdown of / share of / split'       → pie\n"
-    "  • 'KPIs / dashboard numbers'              → kpi\n"
-    "  • 'workflow / diagram / steps'            → flow\n"
-    "  • a paragraph of formatted text           → text"
+    '  - {"type":"line","series":[{"label":"Revenue","data":[{"x":"Jan","y":100}, ...]}]} — line chart, up to 4 series\n'
+    '  - {"type":"pie","data":[{"label":"iOS","value":60}, ...]}                          — pie chart, ≤8 slices\n'
+    '  - {"type":"kpi","items":[{"label":"MRR","value":"$42k","delta":"+8%","delta_dir":"up"}, ...]} — KPI cards, ≤8 items\n'
+    '  - {"type":"flow","nodes":[{"id":"a","label":"Discover"}],"edges":[{"from":"a","to":"b"}]}      — flowchart/diagram, ≤6 nodes\n'
 )
 
 
@@ -169,16 +181,16 @@ TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="create_visual",
         description=(
-            "Render a visual on the bot's video tile in the meeting. The canvas "
-            "updates within ~500ms when using simple types (list/bar/table/text). "
-            "Use this any time the user asks to 'show', 'display', 'put up', 'draw', "
-            "'visualize', or anything similar. PREFER `type: list/bar/table/text` "
-            "for speed — only fall back to `type: html` for genuinely custom layouts."
+            "Create a chart on the dashboard tab. ONLY for explicit chart / "
+            "graph / diagram / KPI requests — for everything else (notes, "
+            "explanations, lists, text), use `think_deep`, `update_notes`, "
+            "or `navigate_canvas`. Auto-switches the canvas to the dashboard "
+            "tab so the user sees the chart immediately."
         ),
         input_schema=ToolSchema(
             type="object",
             properties={
-                "title": {"type": "string", "description": "Short title shown above the visual."},
+                "title": {"type": "string", "description": "Short title shown above the chart."},
                 "spec": {"type": "object", "description": _SPEC_DESCRIPTION},
             },
             required=["spec"],
@@ -188,8 +200,9 @@ TOOLS: list[ToolDefinition] = [
     ToolDefinition(
         name="update_visual",
         description=(
-            "Replace the spec of an existing visual by ID. Same shape as create_visual.spec. "
-            "If the ID is wrong, falls back to updating the most recent visual for this bot."
+            "Replace the spec of an existing chart by ID. If the ID is wrong, "
+            "falls back to updating the most recent chart for this bot. Charts "
+            "only — see `create_visual` for the allowed types."
         ),
         input_schema=ToolSchema(
             type="object",

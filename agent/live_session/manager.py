@@ -53,51 +53,12 @@ GEMINI_OUTPUT_RATE = 24000
 #     requested tools while voice is active.
 #   - Every tool here is short-lived enough (<3s) to be fine inside the
 #     Live toolCall round-trip.
-_LIVE_ALLOWED_TOOLS = frozenset({
-    # Read / lookup
-    "list_tasks",
-    "list_series",
-    "list_upcoming_meetings",
-    "get_recent_occurrences",
-    "get_occurrence_transcript",
-    "get_meeting_notes",
-    "get_series_context_bundle",
-    "search_artifacts",
-    "get_artifact",
-    "semantic_search",
-    "read_recent_chat",
-    "web_search",
-    "fetch_url",
-    # Visuals
-    "create_visual",
-    "update_visual",
-    # Tasks & artifacts
-    "create_task",
-    "update_task_status",
-    "create_artifact",
-    "save_artifact_from_url",
-    "promote_meeting_task",
-    # Chat / email
-    "send_chat_message",
-    "send_email_summary",
-    # Heavier reasoning (still keep latency by using only when needed)
-    "call_model",
-    # Voice state flips
-    "voice_sleep",
-    "voice_wake",
-})
-
-# Backwards-compat alias: a few callers (and tests) still reference the
-# old name. Pointing it at the same set keeps them working.
-_LIVE_READ_ONLY_TOOLS = _LIVE_ALLOWED_TOOLS
-
-# Friendly error returned to Live if it ever tries to call a tool that
-# isn't in the allowed set (shouldn't happen with the new prompt, but
-# the guardrail stays).
-_LIVE_WRITE_REJECTION_TEMPLATE = (
-    "Tool '{name}' isn't available right now. Try a different approach or "
-    "tell the user what you can do instead."
-)
+# Phase 1 of the canvas-rebuild plan eliminated the dual-brain split. Gemini
+# Live now sees and may call ANY tool in the registry. There is no allow-list
+# and no rejection template — those existed to fence off "writes" for the
+# old Turn Processor, which is gone. If you arrived here looking for the old
+# `_LIVE_ALLOWED_TOOLS` / `_LIVE_WRITE_REJECTION_TEMPLATE` symbols: they were
+# intentionally removed.
 
 
 class LiveSessionManager:
@@ -400,25 +361,22 @@ class LiveSessionManager:
     async def _handle_tool_calls(self, calls: list[dict]) -> None:
         from agent.tools import execute_tool
 
+        from agent.tools import TOOL_REGISTRY
+
         responses = []
         for c in calls:
             name = c.get("name", "")
             args = c.get("args", {}) or {}
             call_id = c.get("id", "")
-            if name not in _LIVE_ALLOWED_TOOLS:
-                # Should not happen — Gemini Live is only shown tools from
-                # the allowed set. Guardrail in case the model hallucinates
-                # a tool name. We don't defer to the Turn Processor here;
-                # that path was the source of the "On it" / nothing-happens
-                # bug.
-                rejection = _LIVE_WRITE_REJECTION_TEMPLATE.format(name=name)
-                responses.append(
-                    {
-                        "id": call_id,
-                        "name": name,
-                        "response": {"error": rejection},
-                    }
-                )
+            if name not in TOOL_REGISTRY:
+                # Model hallucinated a tool name. Just return an error to
+                # the model so it can recover; no deferral, no rejection
+                # template, no fallback brain.
+                responses.append({
+                    "id": call_id,
+                    "name": name,
+                    "response": {"error": f"unknown tool: {name}"},
+                })
                 await self._log_action_create(
                     name, args,
                     status="error",
@@ -484,22 +442,8 @@ class LiveSessionManager:
         except Exception:
             pass
 
-    def _kick_turn_processor(self) -> None:
-        """Nudge the Turn Processor (Celery) to run a turn for this bot
-        immediately, instead of waiting for the next scheduler tick.
-        Used when Gemini Live attempts a write tool that we deferred."""
-        try:
-            from agent.turn_processor import process_meeting_turn
-
-            asyncio.create_task(self._kick_turn_async(process_meeting_turn))
-        except Exception:
-            log.exception("_kick_turn_processor: failed bot=%s", self.bot_id)
-
-    async def _kick_turn_async(self, fn) -> None:
-        try:
-            await sync_to_async(lambda: fn.delay(self.bot_id, None, "voice"))()
-        except Exception:
-            log.exception("_kick_turn_async: enqueue failed bot=%s", self.bot_id)
+    # `_kick_turn_processor` was removed — the real-time Turn Processor is
+    # gone. Gemini Live calls tools directly; nothing else needs nudging.
 
     async def _push_canvas_async(self, fn) -> None:
         try:
@@ -588,21 +532,10 @@ class LiveSessionManager:
 
         if finished:
             setattr(self, buf_key, {"text": "", "started_at": None})
-            # Wake the Turn Processor so Haiku can react to the user's
-            # finalized utterance. Skip self-utterances (otherwise the bot
-            # talking to itself triggers the brain).
-            if not is_self:
-                try:
-                    from agent.scheduler import maybe_schedule_turn
-
-                    await sync_to_async(maybe_schedule_turn)(
-                        self.bot_id, priority="normal"
-                    )
-                except Exception:
-                    log.exception(
-                        "_log_transcript: maybe_schedule_turn failed bot=%s",
-                        self.bot_id,
-                    )
+            # No more Turn Processor wake-up here. Gemini Live IS the brain;
+            # finalized utterances are already in its context window via the
+            # live audio stream. The Celery side only runs `summarize_meeting_after_leave`
+            # once when the bot leaves.
 
     async def _log_action_create(
         self,

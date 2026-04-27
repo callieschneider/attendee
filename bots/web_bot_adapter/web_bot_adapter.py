@@ -589,6 +589,13 @@ class WebBotAdapter(BotAdapter):
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
+        # Canvas-rebuild Phase 4 (Present mode): when Meet asks Chrome for a
+        # screen-share source via getDisplayMedia, auto-pick the canvas tab so
+        # the bot can present its own canvas without a UI dialog. Requires the
+        # canvas page <title> to start with "Clever Star · canvas" (set in the
+        # canvas_v2 template).
+        options.add_argument('--auto-select-desktop-capture-source=Clever Star · canvas')
+
         if os.getenv("ENABLE_CHROME_SANDBOX", "false").lower() != "true":
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-setuid-sandbox")

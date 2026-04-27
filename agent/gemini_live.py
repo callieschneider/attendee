@@ -15,65 +15,21 @@ log = logging.getLogger("agent.gemini_live")
 AUTH_TOKENS_URL = "https://generativelanguage.googleapis.com/v1alpha/auth_tokens"
 
 
-# Tools that Gemini Live is allowed to call DIRECTLY. Live IS Clever Star —
-# the user-facing entity — so it owns every tool the user could verbally
-# request. The Turn Processor (Haiku 4.5) only runs in the background to
-# capture missed action items (decisions, URLs, side-channel notes) when
-# Live didn't already act.
-#
-# Earlier versions split tools between Live (read-only) and Turn Processor
-# (writes). That created the "voice says On it but nothing happens" bug:
-# Live narrated an acknowledgement, then the brain frequently failed to
-# fire the actual tool. The single-decision-path model below fixes that.
-#
-# MUST stay in sync with `_LIVE_ALLOWED_TOOLS` in
-# `agent/live_session/manager.py` (the runtime gate).
-_LIVE_VISIBLE_TOOL_NAMES = {
-    # Read / lookup
-    "list_tasks",
-    "list_series",
-    "list_upcoming_meetings",
-    "get_recent_occurrences",
-    "get_occurrence_transcript",
-    "get_meeting_notes",
-    "get_series_context_bundle",
-    "search_artifacts",
-    "get_artifact",
-    "semantic_search",
-    "read_recent_chat",
-    "web_search",
-    "fetch_url",
-    # Visuals — must be sub-second. Live owns these.
-    "create_visual",
-    "update_visual",
-    # Tasks & artifacts — user verbally asks Clever Star to capture them.
-    "create_task",
-    "update_task_status",
-    "create_artifact",
-    "save_artifact_from_url",
-    "promote_meeting_task",
-    # Chat / email — secondary channels Live drives directly.
-    "send_chat_message",
-    "send_email_summary",
-    # Heavier reasoning when a simple visual won't do.
-    "call_model",
-    # Voice state — Live calls these directly when the user signals
-    # sleep/wake intent. Required for sub-second responsiveness.
-    "voice_sleep",
-    "voice_wake",
-}
+# Tools that we deliberately HIDE from Gemini Live, even though they're in
+# the registry. Everything else is exposed. Phase 1 of the canvas-rebuild
+# plan removed the dual-brain split; Live now owns every user-facing
+# action and there's no separate background brain.
+_LIVE_HIDDEN_TOOL_NAMES: set[str] = set()
 
 
 def _gather_tool_schemas_for_gemini_live() -> list[dict]:
     """
-    Expose every user-facing tool to Gemini Live so it can act on requests
-    immediately rather than narrating and hoping the Turn Processor follows
-    through. Same BLOCKING behavior pattern as abstrakt's working setup.
-    The Turn Processor stays in the loop only for background capture.
+    Expose every tool to Gemini Live with BLOCKING behavior. Live IS
+    Clever Star — there's no other brain to defer to.
     """
     decls = []
     for t in TOOL_REGISTRY.values():
-        if t.name not in _LIVE_VISIBLE_TOOL_NAMES:
+        if t.name in _LIVE_HIDDEN_TOOL_NAMES:
             continue
         d = to_gemini_declaration(t)
         d["behavior"] = "BLOCKING"

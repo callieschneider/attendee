@@ -1,15 +1,14 @@
 """
 Voice tools.
 
-  - `speak_via_voice`  — synthesize text via Gemini Live (rare; planner-side)
+  - `speak_via_voice`  — synthesize text via Gemini Live (rare)
   - `voice_sleep`      — stop talking; agent goes silent until woken
   - `voice_wake`       — resume talking; agent re-engages
 
-Both `voice_sleep` and `voice_wake` are intentionally available to the live
-voice model AND the planner brain. The live voice calls them when it hears
-the user mid-conversation; the planner calls them based on webhook
-transcripts (which still arrive while voice is suspended). The LLMs decide
-based on intent — there is no fixed phrase list.
+Gemini Live calls `voice_sleep` / `voice_wake` directly based on intent it
+hears in the room. There's no separate brain that wakes it back up — if
+the voice is asleep, it stays asleep until the user speaks loudly enough
+that Live's own VAD picks them up and decides to wake.
 """
 import logging
 
@@ -125,10 +124,9 @@ TOOLS: list[ToolDefinition] = [
             "the wording does not matter. Examples (non-exhaustive): "
             "'go to sleep', 'be quiet', 'that's enough', 'hold on', 'pause', "
             "'shut up', 'I'll come back to you', 'we're talking among "
-            "ourselves', 'stand by'. Decide by intent, not keywords. The "
-            "background brain (Turn Processor) keeps listening to the "
-            "meeting and can wake you back up. Do NOT speak before calling "
-            "this — just go silent."
+            "ourselves', 'stand by'. Decide by intent, not keywords. Stay "
+            "asleep until the user clearly addresses you again. Do NOT speak "
+            "before calling this — just go silent."
         ),
         input_schema=ToolSchema(
             type="object",
@@ -153,11 +151,9 @@ TOOLS: list[ToolDefinition] = [
             "for you to start talking again — the wording does not matter. "
             "Examples (non-exhaustive): 'wake up', 'are you there', 'come "
             "back', 'okay you can talk', 'let's go again', 'jump back in'. "
-            "Decide by intent, not keywords. While asleep the live voice "
-            "model may not hear the user — the Turn Processor invokes this "
-            "tool on its behalf based on webhook transcripts. After waking, "
-            "respond to whatever the user actually asked (use "
-            "`greeting_context` to pass the wake utterance text)."
+            "Decide by intent, not keywords. After waking, respond to "
+            "whatever the user actually asked (use `greeting_context` to "
+            "pass the wake utterance text)."
         ),
         input_schema=ToolSchema(
             type="object",
