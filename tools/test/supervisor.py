@@ -139,10 +139,19 @@ def inject_utterance(base_url: str, token: str, bot_id: str, text: str, speaker:
     return code == 200
 
 
-def diff_state(before: dict, after: dict) -> dict:
-    actions_before = {(a.get("t"), a.get("tool")) for a in before.get("action_log", [])}
+def diff_state(before: dict, after: dict, *, inject_ts_iso: str | None = None) -> dict:
+    """
+    Compare two state.json snapshots. If `inject_ts_iso` is supplied,
+    "new actions" are filtered to those whose `t` is strictly greater —
+    that way an action that existed before this case (e.g., from the
+    previous case running long) doesn't leak into this case's diff.
+    """
     actions_after = after.get("action_log", []) or []
-    new_actions = [a for a in actions_after if (a.get("t"), a.get("tool")) not in actions_before]
+    if inject_ts_iso is not None:
+        new_actions = [a for a in actions_after if (a.get("t") or "") > inject_ts_iso]
+    else:
+        actions_before = {(a.get("t"), a.get("tool")) for a in before.get("action_log", [])}
+        new_actions = [a for a in actions_after if (a.get("t"), a.get("tool")) not in actions_before]
 
     notes_before = before.get("notes_md", "") or ""
     notes_after = after.get("notes_md", "") or ""
@@ -160,6 +169,40 @@ def diff_state(before: dict, after: dict) -> dict:
         "focus_text_after": (after.get("focus") or {}).get("text", "")[:600],
         "transcript_grew_by": len(after.get("transcript", []) or []) - len(before.get("transcript", []) or []),
     }
+
+
+def poll_until_satisfied(
+    base: str,
+    bot_id: str,
+    case: dict,
+    inject_ts_iso: str,
+    before: dict,
+    max_wait_s: int,
+):
+    """
+    Poll state.json every ~1.5s up to `max_wait_s`. Return as soon as
+    the expectations for this case are satisfied, OR when the wait
+    window elapses (whichever comes first). This is the fix for the
+    flaky 6/8 we kept seeing — Gemini sometimes takes longer than the
+    fixed wait_seconds and the action would land in the next case's
+    window, causing a false fail here AND a false pass there.
+    """
+    deadline = time.monotonic() + max_wait_s
+    last_diff = None
+    last_eval: tuple[bool, list[str]] = (False, ["no snapshot yet"])
+    while True:
+        try:
+            after = fetch_state(base, bot_id)
+        except Exception as e:
+            after = before
+            last_eval = (False, [f"snapshot failed: {e}"])
+        last_diff = diff_state(before, after, inject_ts_iso=inject_ts_iso)
+        last_eval = evaluate(case, last_diff)
+        if last_eval[0]:
+            return after, last_diff, last_eval
+        if time.monotonic() >= deadline:
+            return after, last_diff, last_eval
+        time.sleep(1.5)
 
 
 def evaluate(case: dict, diff: dict) -> tuple[bool, list[str]]:
@@ -337,18 +380,24 @@ def main():
             print(f"  pre-snapshot failed: {e}")
             results.append((case, False, [f"pre-snapshot failed: {e}"]))
             continue
+        # Capture inject timestamp BEFORE injecting so any action whose
+        # `t` is strictly greater belongs to this case.
+        inject_ts_iso = dt.datetime.now(dt.timezone.utc).isoformat()
         if not inject_utterance(base, token, bot_id, case["utterance"], speaker=case.get("speaker", "Tester")):
             results.append((case, False, ["inject_utterance returned non-200"]))
             continue
         wait_s = int(case.get("expect", {}).get("wait_seconds", 12))
-        time.sleep(wait_s)
-        try:
-            after = fetch_state(base, bot_id)
-        except Exception as e:
-            results.append((case, False, [f"post-snapshot failed: {e}"]))
-            continue
-        diff = diff_state(before, after)
-        ok, fails = evaluate(case, diff)
+        # Poll until satisfied or deadline — return early on PASS so we
+        # don't waste the rest of the budget waiting once Gemini's already
+        # acted. Bounded by wait_seconds + 50% padding for slow turns.
+        max_wait = max(wait_s + (wait_s // 2), wait_s + 5)
+        after, diff, (ok, fails) = poll_until_satisfied(
+            base, bot_id, case, inject_ts_iso, before, max_wait
+        )
+        # Brief drain so the next case's "before" snapshot doesn't include
+        # actions still settling from this one. ~0.5s is enough; the
+        # inject_ts filter prevents most leakage anyway.
+        time.sleep(0.5)
         write_case_report(case, diff, ok, fails, run_dir / f"{case['id']}.md")
         results.append((case, ok, fails))
         print(f"  -> {'PASS' if ok else 'FAIL'}  {' | '.join(fails) if fails else ''}")
