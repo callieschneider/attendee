@@ -25,6 +25,10 @@ GATE_EXTEND_CHANNEL = "agent:live:gate_extend"
 GATE_CLOSE_CHANNEL = "agent:live:gate_close"
 SPEAK_CHANNEL = "agent:live:speak"
 VOICE_CONTEXT_CHANNEL = "agent:live:voice_ctx"
+# Test-harness channel: simulate a fully-transcribed user utterance.
+# Bridge forwards as clientContent so Gemini treats it as a complete
+# user turn and responds. Used by the overnight test harness.
+INJECT_UTTERANCE_CHANNEL = "agent:live:inject_utterance"
 
 # Redis keys tracking voice state for cross-process coordination.
 GATE_STATE_KEY_FMT = "agent:gate:{bot_id}"
@@ -195,6 +199,19 @@ def publish_voice_context(bot_id: str, text: str, turn_id: Optional[str] = None)
     return _publish(
         VOICE_CONTEXT_CHANNEL,
         {"bot_id": bot_id, "text": text, "turn_id": turn_id},
+    )
+
+
+def publish_inject_utterance(bot_id: str, text: str, speaker: str = "Tester") -> bool:
+    """
+    Push a synthetic user utterance into the live session as if it were
+    transcribed by Gemini. The bridge handler forwards as clientContent
+    with turnComplete:true so Gemini treats it as a finished user turn
+    and emits a response. Test-harness only.
+    """
+    return _publish(
+        INJECT_UTTERANCE_CHANNEL,
+        {"bot_id": bot_id, "text": text, "speaker": speaker},
     )
 
 

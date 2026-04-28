@@ -704,6 +704,7 @@ class LiveSessionManager:
             signals.GATE_CLOSE_CHANNEL,
             signals.SPEAK_CHANNEL,
             signals.VOICE_CONTEXT_CHANNEL,
+            signals.INJECT_UTTERANCE_CHANNEL,
         ]
         try:
             async for channel, payload in signals.subscribe(channels):
@@ -732,6 +733,11 @@ class LiveSessionManager:
                     text = payload.get("text", "")
                     if text:
                         await self._push_realtime_text(text)
+                elif channel == signals.INJECT_UTTERANCE_CHANNEL:
+                    text = payload.get("text", "")
+                    speaker = payload.get("speaker", "Tester")
+                    if text:
+                        await self._inject_user_utterance(text, speaker)
         except Exception:
             log.exception("live_session: signal_listener failed bot=%s", self.bot_id)
 
@@ -759,6 +765,69 @@ class LiveSessionManager:
         # Phrase it as something Gemini Live would naturally produce next.
         # Using plain text here avoids Gemini treating it as a command/instruction.
         await self._push_realtime_text(text)
+
+    async def _inject_user_utterance(self, text: str, speaker: str = "Tester") -> None:
+        """
+        Test-harness only: push a fully-transcribed user utterance into
+        Gemini Live via clientContent with turnComplete:true. Gemini
+        treats this as a completed user turn and emits a response, so
+        the harness can verify tool calls / canvas deltas / responses
+        without going through the audio path.
+
+        Bypasses the audio gate (since no audio is involved). Persists
+        a TranscriptEvent row tagged source="injected" so the canvas
+        Debug tab shows the utterance in the transcript stream.
+        """
+        if not self._gemini_ws:
+            log.warning("live_session: inject_utterance with no WS bot=%s", self.bot_id)
+            return
+        try:
+            async with self._send_lock:
+                await self._gemini_ws.send(
+                    json.dumps(
+                        {
+                            "clientContent": {
+                                "turns": [
+                                    {
+                                        "role": "user",
+                                        "parts": [{"text": text}],
+                                    }
+                                ],
+                                "turnComplete": True,
+                            }
+                        }
+                    )
+                )
+            log.info(
+                "live_session: injected utterance bot=%s speaker=%s text=%s",
+                self.bot_id, speaker, text[:80],
+            )
+        except Exception:
+            log.exception("live_session: inject_user_utterance send failed bot=%s", self.bot_id)
+            return
+
+        # Persist as a TranscriptEvent so the harness can read it back
+        # from /agent/canvas/v2/<bot>/state.json.
+        try:
+            from asgiref.sync import sync_to_async
+            from django.utils import timezone
+
+            from agent.models import TranscriptEvent
+
+            @sync_to_async
+            def _persist():
+                TranscriptEvent.objects.create(
+                    bot_id=self.bot_id,
+                    kind="speech",
+                    event_time=timezone.now(),
+                    speaker=speaker,
+                    text=text,
+                    raw={"source": "injected"},
+                )
+
+            await _persist()
+        except Exception:
+            log.exception("live_session: persist injected utterance failed bot=%s", self.bot_id)
 
     # ── Persistence (MeetingCursor) ──────────────────────────────────────────
 

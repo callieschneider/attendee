@@ -424,3 +424,41 @@ def calendar_callback(request):
 <p><a href="/admin/">← Back to admin</a></p>
 </body></html>"""
     return HttpResponse(html)
+
+
+# ── Test harness: utterance injection ─────────────────────────────────────────
+@csrf_exempt
+@require_POST
+def inject_utterance(request):
+    """
+    Test-harness endpoint. Pushes a synthetic user utterance into a live
+    Gemini session so the harness can verify tool calls and canvas
+    deltas without going through the audio path.
+
+    Auth: header `X-Debug-Token` must equal env `AGENT_DEBUG_TOKEN`. Endpoint
+    does nothing useful unless that env var is set, so prod is opt-in.
+
+    Body: {"bot_id": "...", "text": "...", "speaker": "Tester" (optional)}
+    """
+    debug_token = getattr(settings, "AGENT_DEBUG_TOKEN", "") or ""
+    if not debug_token:
+        return JsonResponse({"error": "debug endpoints disabled"}, status=403)
+    sent_token = request.headers.get("X-Debug-Token", "")
+    if not hmac.compare_digest(sent_token, debug_token):
+        return JsonResponse({"error": "bad token"}, status=403)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "malformed json"}, status=400)
+
+    bot_id = (body.get("bot_id") or "").strip()
+    text = (body.get("text") or "").strip()
+    speaker = (body.get("speaker") or "Tester").strip()
+    if not bot_id or not text:
+        return JsonResponse({"error": "bot_id and text required"}, status=400)
+
+    from .live_session import signals as _sig
+
+    ok = _sig.publish_inject_utterance(bot_id, text, speaker=speaker)
+    return JsonResponse({"ok": ok, "bot_id": bot_id, "text": text, "speaker": speaker})
