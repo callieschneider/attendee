@@ -219,6 +219,7 @@ function Dashboard({ snapshot }) {
   const dash = snapshot.dashboard || {};
   const tasks = snapshot.tasks || [];
   const focus = snapshot.focus || {};
+  const dashEntries = Object.entries(dash);
   return html`
     <div class="grid grid-cols-12 gap-4 p-6">
       <div class="col-span-12 lg:col-span-8 bg-paper border border-line rounded-xl p-5">
@@ -238,6 +239,18 @@ function Dashboard({ snapshot }) {
           <div class="text-xs text-mute mt-1">${tasks.filter(t => t.priority === "high" || t.priority === "critical").length} high priority</div>
         </div>
       </div>
+      ${dashEntries.length > 0 ? html`
+        <div class="col-span-12 bg-paper border border-line rounded-xl p-5">
+          <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-3">Status</div>
+          <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            ${dashEntries.map(([k, v]) => html`
+              <div key=${k} class="bg-surface border border-line rounded-lg px-3 py-2.5">
+                <div class="text-[10px] uppercase tracking-[0.1em] text-mute mb-0.5">${k.replaceAll("_", " ")}</div>
+                <div class="text-sm font-medium text-ink break-words">${typeof v === "object" ? JSON.stringify(v) : String(v)}</div>
+              </div>`)}
+          </div>
+        </div>
+      ` : null}
       <div class="col-span-12 bg-paper border border-line rounded-xl p-5">
         <div class="text-[11px] uppercase tracking-[0.12em] text-mute mb-3">Recent notes</div>
         ${snapshot.notes_md
