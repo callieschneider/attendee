@@ -27,12 +27,28 @@ def ensure_series_id(inp: dict, ctx: dict) -> str:
     """
     from agent.models import MeetingSeries
 
+    from django.core.exceptions import ValidationError
+
     series_id = inp.get("series_id") or ctx.get("series_id")
     if series_id:
-        # Validate it exists to surface a clear error vs a Django FK explosion
-        if MeetingSeries.objects.filter(id=series_id).exists():
-            return str(series_id)
-        log.warning("ensure_series_id: series_id %s not found; falling back to Inbox", series_id)
+        # Validate it exists. Django raises ValidationError if the value
+        # isn't a parseable UUID (e.g. Gemini Live sometimes passes literal
+        # 'inbox' or a free-form string instead of a real UUID). Catch
+        # that and fall through to the Inbox series rather than blow up
+        # the create_task call.
+        try:
+            if MeetingSeries.objects.filter(id=series_id).exists():
+                return str(series_id)
+        except ValidationError:
+            log.info(
+                "ensure_series_id: series_id %r is not a UUID; using Inbox",
+                series_id,
+            )
+        else:
+            log.warning(
+                "ensure_series_id: series_id %s not found; falling back to Inbox",
+                series_id,
+            )
 
     inbox, created = MeetingSeries.objects.get_or_create(
         title=INBOX_SERIES_TITLE,
