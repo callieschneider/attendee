@@ -229,32 +229,66 @@ class LiveSessionManager:
     # ── Concurrent sub-tasks ─────────────────────────────────────────────────
 
     async def _gemini_reader(self) -> None:
-        """Read Gemini Live frames: audio, toolCalls, goAway, sessionResumption."""
+        """
+        Read Gemini Live frames in a single reconnect loop.
+
+        The audio pump and signal listener re-read `self._gemini_ws` on
+        every send, so swapping the WS reference here transparently
+        upgrades them too. They don't need their own reconnect logic and
+        the outer asyncio.gather doesn't exit until `_stop_event` is set
+        (ie. the Attendee WS closes for real). This is the single
+        reconnect path — no fire-and-forget tasks racing with each
+        other.
+        """
         while not self._stop_event.is_set():
+            ws = self._gemini_ws
+            if ws is None:
+                # Hit only if a prior reopen failed. Idle briefly and try.
+                await asyncio.sleep(1)
+                if self._stop_event.is_set():
+                    return
+                try:
+                    await self._open_gemini_session()
+                except Exception:
+                    log.exception(
+                        "live_session: idle reopen failed bot=%s — backing off",
+                        self.bot_id,
+                    )
+                    await asyncio.sleep(2)
+                continue
+
+            close_reason = "unknown"
             try:
-                async for raw in self._gemini_ws:
+                async for raw in ws:
                     try:
                         msg = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
                     await self._handle_gemini_message(msg)
-                # WS closed cleanly — reopen via resumption handle
-                if not self._stop_event.is_set():
-                    await self._reopen_gemini_session("ws_closed")
+                close_reason = "iter_end"
             except websockets.exceptions.ConnectionClosed as e:
-                log.info("live_session: Gemini WS closed bot=%s — %s", self.bot_id, e)
-                if self._stop_event.is_set():
-                    return
-                await self._reopen_gemini_session("conn_closed")
+                close_reason = f"closed:{e.code}"
+                log.info(
+                    "live_session: Gemini WS closed bot=%s — %s", self.bot_id, e
+                )
             except Exception:
+                close_reason = "error"
                 log.exception("live_session: gemini_reader error bot=%s", self.bot_id)
                 await asyncio.sleep(1)
-                if not self._stop_event.is_set():
-                    try:
-                        await self._reopen_gemini_session("error")
-                    except Exception:
-                        log.exception("live_session: reopen failed; giving up bot=%s", self.bot_id)
-                        return
+
+            if self._stop_event.is_set():
+                return
+
+            try:
+                await self._reopen_gemini_session(close_reason)
+            except Exception:
+                log.exception(
+                    "live_session: reopen failed bot=%s reason=%s — retrying",
+                    self.bot_id, close_reason,
+                )
+                # Mark WS gone so next iteration tries from scratch.
+                self._gemini_ws = None
+                await asyncio.sleep(2)
 
     async def _handle_gemini_message(self, msg: dict) -> None:
         # Session resumption update — persist the newHandle
@@ -263,10 +297,17 @@ class LiveSessionManager:
             self._resumption_handle = sr["newHandle"]
             await self._persist_resumption_handle(self._resumption_handle)
 
-        # Server tells us to reopen soon
+        # Server tells us to reopen soon. Just log and close the WS;
+        # the reader loop's natural close path handles the reconnect
+        # using the persisted sessionResumption handle. Avoids the
+        # double-reopen race we used to have with asyncio.create_task.
         if "goAway" in msg:
-            log.info("live_session: goAway bot=%s — scheduling reopen", self.bot_id)
-            asyncio.create_task(self._reopen_gemini_session("go_away"))
+            log.info("live_session: goAway bot=%s — closing WS for reopen", self.bot_id)
+            try:
+                if self._gemini_ws:
+                    await self._gemini_ws.close()
+            except Exception:
+                pass
             return
 
         # Audio out (only flush to Attendee when gate open)
@@ -697,9 +738,14 @@ class LiveSessionManager:
                     if len(self._setup_audio_buffer) < self._SETUP_BUFFER_MAX_FRAMES:
                         self._setup_audio_buffer.append({"data": pcm_b64})
                     continue
+                ws = self._gemini_ws
+                if ws is None:
+                    # Mid-reopen — drop this frame, the next ones will land
+                    # on the new WS once reader brings it up.
+                    continue
                 try:
                     async with self._send_lock:
-                        await self._gemini_ws.send(
+                        await ws.send(
                             json.dumps(
                                 {
                                     "realtimeInput": {
@@ -711,10 +757,18 @@ class LiveSessionManager:
                                 }
                             )
                         )
+                except websockets.exceptions.ConnectionClosed:
+                    # Gemini WS closed mid-send. The reader loop will
+                    # reopen; keep the pump running so audio resumes
+                    # once the new WS is up.
+                    continue
                 except Exception:
                     log.exception("live_session: gemini audio send failed bot=%s", self.bot_id)
-                    return
+                    # Don't tear down the whole session for a transient
+                    # send error — let the reader handle reconnect.
+                    continue
         except websockets.exceptions.ConnectionClosed:
+            # Attendee WS itself closed — that's the real shutdown signal.
             raise
         finally:
             self._stop_event.set()
@@ -792,14 +846,20 @@ class LiveSessionManager:
     async def _inject_user_utterance(self, text: str, speaker: str = "Tester") -> None:
         """
         Test-harness only: push a fully-transcribed user utterance into
-        Gemini Live via clientContent with turnComplete:true. Gemini
-        treats this as a completed user turn and emits a response, so
-        the harness can verify tool calls / canvas deltas / responses
-        without going through the audio path.
+        Gemini Live as if the user spoke it. The harness uses this to
+        verify tool calls / canvas deltas / responses without going
+        through the audio path.
 
-        Bypasses the audio gate (since no audio is involved). Persists
-        a TranscriptEvent row tagged source="injected" so the canvas
-        Debug tab shows the utterance in the transcript stream.
+        Per abstraKt's gemini-live.ts (working reference): use
+        `realtimeInput.text`, NOT `clientContent.turns`. The
+        `gemini-3.1-flash-live-preview` model treats `clientContent` as
+        history-seeding only and triggers a 1008 'Operation is not
+        implemented' close when used for mid-session turn updates.
+        `realtimeInput.text` is treated as a complete user turn and
+        Gemini emits a response (TTS + tool calls).
+
+        Persists a TranscriptEvent row tagged source="injected" so the
+        canvas Debug tab shows the utterance in the transcript stream.
         """
         if not self._gemini_ws:
             log.warning("live_session: inject_utterance with no WS bot=%s", self.bot_id)
@@ -807,19 +867,7 @@ class LiveSessionManager:
         try:
             async with self._send_lock:
                 await self._gemini_ws.send(
-                    json.dumps(
-                        {
-                            "clientContent": {
-                                "turns": [
-                                    {
-                                        "role": "user",
-                                        "parts": [{"text": text}],
-                                    }
-                                ],
-                                "turnComplete": True,
-                            }
-                        }
-                    )
+                    json.dumps({"realtimeInput": {"text": text}})
                 )
             log.info(
                 "live_session: injected utterance bot=%s speaker=%s text=%s",

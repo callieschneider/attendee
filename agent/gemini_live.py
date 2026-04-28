@@ -54,7 +54,11 @@ def build_live_setup(
     - Session resumption for the ~10-min cap
     """
     model = getattr(settings, "AGENT_LIVE_MODEL", "gemini-3.1-flash-live-preview")
-    thinking_level = getattr(settings, "AGENT_LIVE_THINKING_LEVEL", "HIGH").upper()
+    # MINIMAL by default — abstraKt's working configuration. HIGH adds
+    # latency and reasoning detours that delay or skip tool fires;
+    # MINIMAL keeps tool calls snappy. Tunable via AGENT_LIVE_THINKING_LEVEL
+    # env (MINIMAL / LOW / MEDIUM / HIGH).
+    thinking_level = getattr(settings, "AGENT_LIVE_THINKING_LEVEL", "MINIMAL").upper()
 
     tool_declarations = _gather_tool_schemas_for_gemini_live()
 
@@ -77,25 +81,14 @@ def build_live_setup(
         "contextWindowCompression": {"slidingWindow": {}},
         "inputAudioTranscription": {},
         "outputAudioTranscription": {},
-        # VAD tuned for a meeting bot. The bot's own TTS comes back through
-        # the meeting's mixed audio (we suppress most of it via
-        # _bot_speaking_until in LiveSessionManager, but a tail bleeds
-        # through). With HIGH start sensitivity that bleed used to trip
-        # Gemini's interrupt detection — it would cut itself off mid-
-        # sentence, restart, get echo'd again, and the user heard the bot
-        # repeating itself. LOW start sensitivity ignores that quiet echo
-        # while still firing on real user voice (which arrives louder
-        # through the meeting mix). End sensitivity stays HIGH so turn-
-        # ending is snappy.
-        "realtimeInputConfig": {
-            "automaticActivityDetection": {
-                "disabled": False,
-                "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
-                "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
-                "prefixPaddingMs": 60,
-                "silenceDurationMs": 250,
-            },
-        },
+        # NOTE: previously set realtimeInputConfig.automaticActivityDetection
+        # with custom thresholds (LOW start / HIGH end / 250ms silence) to
+        # combat Meet audio echoes. abstraKt's working Gemini Live config
+        # leaves these at Gemini defaults and tool calls fire reliably.
+        # Echo suppression now lives in LiveSessionManager._attendee_audio_pump
+        # (env-tunable AGENT_ECHO_TAIL_MS / AGENT_INTERRUPT_TAIL_MS /
+        # AGENT_TURN_COOLDOWN_MS) — same place where we know which bytes
+        # are bot output vs real user mic.
     }
 
     return {"setup": setup}
