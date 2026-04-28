@@ -39,6 +39,17 @@ GEMINI_WS_URL = (
 ATTENDEE_SAMPLE_RATE = 16000
 GEMINI_OUTPUT_RATE = 24000
 
+# Echo suppression knobs (env-tweakable for A/B without redeploys).
+# AGENT_ECHO_TAIL_MS: how long after each bot-audio frame we drop incoming
+#   mic audio. Larger = safer against echo, smaller = snappier barge-in.
+# AGENT_INTERRUPT_TAIL_MS: extra suppression on Gemini interrupt events.
+# AGENT_TURN_COOLDOWN_MS: extra silence after turnComplete before the audio
+#   pump re-opens. Raise this if the bot keeps re-triggering on its own
+#   echo at the end of a response.
+ECHO_TAIL_S = float(os.getenv("AGENT_ECHO_TAIL_MS", "600")) / 1000.0
+INTERRUPT_TAIL_S = float(os.getenv("AGENT_INTERRUPT_TAIL_MS", "600")) / 1000.0
+TURN_COOLDOWN_S = float(os.getenv("AGENT_TURN_COOLDOWN_MS", "0")) / 1000.0
+
 
 # Tools Gemini Live is allowed to execute DIRECTLY from its toolCall stream.
 # Live IS the user-facing agent (Clever Star) so it owns every user-facing
@@ -300,7 +311,7 @@ class LiveSessionManager:
             # interrupt — that frame produced this very signal).
             self._bot_speaking_until = max(
                 self._bot_speaking_until,
-                time.monotonic() + 0.6,
+                time.monotonic() + INTERRUPT_TAIL_S,
             )
         if self._interrupted_until > time.monotonic():
             # Skip any audio output during the drain window
@@ -322,8 +333,9 @@ class LiveSessionManager:
                 # 0.60s is empirically needed to swallow the full
                 # Attendee→Meet→browser→back-to-Attendee echo loop on
                 # noisy connections (300ms was too tight and produced
-                # self-interrupting "my mistake" loops).
-                self._bot_speaking_until = time.monotonic() + 0.60
+                # self-interrupting "my mistake" loops). Tunable via
+                # AGENT_ECHO_TAIL_MS env (see top of file).
+                self._bot_speaking_until = time.monotonic() + ECHO_TAIL_S
                 pcm_24k = b64_to_pcm16(data)
                 pcm_16k = pcm16_resample(pcm_24k, GEMINI_OUTPUT_RATE, ATTENDEE_SAMPLE_RATE)
                 try:
@@ -350,8 +362,18 @@ class LiveSessionManager:
                 "live_session: turnComplete bot=%s — leaving gate open for reply",
                 self.bot_id,
             )
-            # Bot is done speaking; user can speak immediately now.
-            self._bot_speaking_until = 0.0
+            # Bot is done speaking. By default open the mic immediately.
+            # If AGENT_TURN_COOLDOWN_MS is set, hold the suppression
+            # window for that long after the turn ends — useful when the
+            # very tail of the bot's speech echoes back through Meet's
+            # mixer and re-triggers Gemini's VAD as a "user" event.
+            if TURN_COOLDOWN_S > 0:
+                self._bot_speaking_until = max(
+                    self._bot_speaking_until,
+                    time.monotonic() + TURN_COOLDOWN_S,
+                )
+            else:
+                self._bot_speaking_until = 0.0
 
         # Tool calls — only read-only fast-path; writes go through Turn Processor
         tc = msg.get("toolCall")

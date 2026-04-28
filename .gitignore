@@ -98,7 +98,6 @@ local_settings.py
 .env.harness
 db.sqlite3
 tools/test/runs/
-tools/test/surface/
 
 custom/
 docker-compose.yaml
