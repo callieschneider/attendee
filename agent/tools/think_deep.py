@@ -158,8 +158,81 @@ _DEFAULT_SYSTEM_PROMPT = (
     "stream onto the user's canvas. Use clean markdown: a short title (one "
     "line, no leading hashes), 4-8 bullets or short paragraphs, no preamble, "
     "no apologies. Be specific and useful. Plain text only — no code fences "
-    "unless code is genuinely required."
+    "unless code is genuinely required.\n\n"
+    "IMPORTANT: do NOT say things like 'I don't have access to that' or "
+    "'please share the data' — the live agent has already done the lookups "
+    "and a 'Conversation context' section below contains the recent "
+    "transcript and tool results. Use that context to answer. If it's "
+    "genuinely insufficient, write the best general-knowledge answer you "
+    "can and flag a single specific question at the end."
 )
+
+
+_RECENT_TRANSCRIPT_LIMIT = 20
+_RECENT_ACTION_RESULTS_LIMIT = 6
+_ACTION_RESULT_CHAR_BUDGET = 2400
+
+
+def _gather_context(bot_id: str) -> str:
+    """
+    Build a 'Conversation context' block from recent transcript events and
+    recent successful tool results, so Haiku has the same situational
+    awareness Gemini Live does. Without this, Haiku says 'I don't have
+    that data' and overwrites the focus tab — which contradicts what
+    Gemini just said verbally.
+    """
+    parts: list[str] = []
+    try:
+        from agent.models import ActionLogEntry, TranscriptEvent
+    except Exception:
+        log.exception("think_deep: model import failed bot=%s", bot_id)
+        return ""
+
+    try:
+        events = list(
+            TranscriptEvent.objects.filter(bot_id=bot_id, kind="speech")
+            .order_by("-event_time")[:_RECENT_TRANSCRIPT_LIMIT]
+        )
+        events.reverse()
+        if events:
+            lines = []
+            for e in events:
+                speaker = (e.speaker or "?").strip()
+                text = (e.text or "").strip()
+                if not text:
+                    continue
+                lines.append(f"{speaker}: {text}")
+            if lines:
+                parts.append("Recent transcript (oldest first):\n" + "\n".join(lines))
+    except Exception:
+        log.exception("think_deep: transcript fetch failed bot=%s", bot_id)
+
+    try:
+        actions = list(
+            ActionLogEntry.objects.filter(bot_id=bot_id, status="ok")
+            .order_by("-created_at")[:_RECENT_ACTION_RESULTS_LIMIT]
+        )
+        actions.reverse()
+        if actions:
+            chunks: list[str] = ["Recent tool results (oldest first):"]
+            remaining = _ACTION_RESULT_CHAR_BUDGET
+            for a in actions:
+                if remaining <= 0:
+                    break
+                try:
+                    payload = json.dumps(a.tool_result, default=str, ensure_ascii=False)
+                except Exception:
+                    payload = str(a.tool_result)
+                payload = payload[: max(200, remaining)]
+                remaining -= len(payload)
+                chunks.append(f"- {a.tool_name}: {payload}")
+            parts.append("\n".join(chunks))
+    except Exception:
+        log.exception("think_deep: action fetch failed bot=%s", bot_id)
+
+    if not parts:
+        return ""
+    return "\n\n=== Conversation context ===\n" + "\n\n".join(parts)
 
 
 def _think_deep(inp: dict, ctx: dict) -> dict:
@@ -179,6 +252,15 @@ def _think_deep(inp: dict, ctx: dict) -> dict:
         settings, "AGENT_THINK_DEEP_MODEL", _DEFAULT_MODEL
     )
     system_prompt = (inp.get("system_prompt") or "").strip() or _DEFAULT_SYSTEM_PROMPT
+
+    # Append recent transcript + tool results so Haiku has the same
+    # situational awareness as Gemini Live. Avoids the failure mode
+    # where Haiku writes "I don't have access to that" onto the focus
+    # tab right after Gemini Live verbally summarized data Gemini just
+    # web-searched.
+    ctx_block = _gather_context(bot_id)
+    if ctx_block:
+        system_prompt = system_prompt + ctx_block
 
     session_id = str(uuid.uuid4())
     started_at = time.time()
@@ -242,7 +324,13 @@ TOOLS: list[ToolDefinition] = [
                     "type": "string",
                     "description": (
                         "What to think about. Be specific — write the prompt "
-                        "as if you were briefing a smart colleague."
+                        "as if you were briefing a smart colleague. Recent "
+                        "transcript and your recent tool results (web_search, "
+                        "lookups, etc.) are auto-attached to Haiku's context, "
+                        "so you DON'T need to paste them here. Just say what "
+                        "you want synthesized, e.g. 'summarize the Gresham "
+                        "weather data we just pulled into a clean week-ahead "
+                        "outlook for the canvas.'"
                     ),
                 },
                 "target_tab": {
