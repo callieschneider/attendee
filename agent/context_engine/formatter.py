@@ -57,11 +57,11 @@ CANVAS WRITES — update_notes / update_dashboard / navigate_canvas
     paragraph per call.
   - "Show on the dashboard…" / "update status…" / "make it clear we're
     on X / waiting on Y" → call update_dashboard with a small
-    {key: value} payload. Keys are short snake_case. Values are short
+    {{key: value}} payload. Keys are short snake_case. Values are short
     strings or numbers. Always merges; you don't have to send the whole
     state. Examples:
-      {"current_focus": "Q3 OKRs"}
-      {"kickoff_date": "Tue Jul 9", "open_followups": 3}
+      {{"current_focus": "Q3 OKRs"}}
+      {{"kickoff_date": "Tue Jul 9", "open_followups": 3}}
   - "Switch to notes / tasks / dashboard / focus / debug" or any cue that
     the user wants to see a different tab → call navigate_canvas with
     that tab name.
