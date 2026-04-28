@@ -20,7 +20,7 @@ from django.utils import timezone
 log = logging.getLogger("agent.canvas_v2.state")
 
 
-VALID_TABS = ("dashboard", "notes", "tasks", "focus", "debug")
+VALID_TABS = ("dashboard", "notes", "tasks", "focus", "browser", "debug")
 
 
 # ── Redis client ──────────────────────────────────────────────────────────────
@@ -145,6 +145,46 @@ def update_dashboard(bot_id: str, payload: dict) -> dict:
         state.save(update_fields=["dashboard_payload", "updated_at"])
     publish_state_event(bot_id, {"event": "dashboard", "payload": merged})
     return {"ok": True, "payload": merged}
+
+
+def open_url(bot_id: str, url: str, title: str = "") -> dict:
+    """Set the canvas browser URL and switch to the browser tab."""
+    if not url:
+        return {"error": "url required"}
+    url = url.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        url = "https://" + url
+    with transaction.atomic():
+        state = _get_or_create_state(bot_id)
+        if state is None:
+            return {"error": "no bot for that id"}
+        state.browser_url = url[:2048]
+        state.browser_title = (title or "")[:255]
+        if not state.user_driving:
+            state.active_tab = "browser"
+        state.save(update_fields=[
+            "browser_url", "browser_title", "active_tab", "updated_at",
+        ])
+    publish_state_event(bot_id, {
+        "event": "browser",
+        "url": url,
+        "title": title or "",
+        "tab": state.active_tab,
+    })
+    return {"ok": True, "url": url, "title": title or "", "tab": state.active_tab}
+
+
+def close_url(bot_id: str) -> dict:
+    """Clear the canvas browser URL."""
+    with transaction.atomic():
+        state = _get_or_create_state(bot_id)
+        if state is None:
+            return {"error": "no bot for that id"}
+        state.browser_url = ""
+        state.browser_title = ""
+        state.save(update_fields=["browser_url", "browser_title", "updated_at"])
+    publish_state_event(bot_id, {"event": "browser", "url": "", "title": ""})
+    return {"ok": True}
 
 
 def update_focus(
@@ -288,6 +328,10 @@ def snapshot(bot_id: str) -> dict:
             "session_id": (state.focus_session_id if state else ""),
             "text": (state.focus_text if state else ""),
             "done": bool(state.focus_done if state else True),
+        },
+        "browser": {
+            "url": (state.browser_url if state else ""),
+            "title": (state.browser_title if state else ""),
         },
         "dashboard": (state.dashboard_payload if state else {}) or {},
         "tasks": open_tasks,

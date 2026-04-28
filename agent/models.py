@@ -613,12 +613,14 @@ class CanvasState(models.Model):
     TAB_NOTES = "notes"
     TAB_TASKS = "tasks"
     TAB_FOCUS = "focus"
+    TAB_BROWSER = "browser"
     TAB_DEBUG = "debug"
     TAB_CHOICES = [
         (TAB_DASHBOARD, "Dashboard"),
         (TAB_NOTES, "Notes"),
         (TAB_TASKS, "Tasks"),
         (TAB_FOCUS, "Focus"),
+        (TAB_BROWSER, "Browser"),
         (TAB_DEBUG, "Debug"),
     ]
 
@@ -651,6 +653,16 @@ class CanvasState(models.Model):
 
     # Free-form JSON the agent populates for the dashboard cards.
     dashboard_payload = models.JSONField(default=dict, blank=True)
+
+    # Browser tab state — the agent can put a URL on the canvas via the
+    # `open_url` tool. The canvas renders it in an iframe; sites that
+    # send X-Frame-Options: DENY won't load (the canvas shows a "this
+    # site can't be embedded" fallback with an open-in-new-tab link).
+    # Navigation within the iframe is read-only by design — for full
+    # interactive automation see Phase 2 (headless Chrome controlled
+    # by the bridge).
+    browser_url = models.URLField(max_length=2048, blank=True, default="")
+    browser_title = models.CharField(max_length=255, blank=True, default="")
 
     # When a non-bot WS client (the user's own browser) is connected the agent
     # treats canvas navigation as user-driven and stops auto-switching tabs.

@@ -169,6 +169,7 @@ const TABS = [
   { id: "notes",     label: "Notes" },
   { id: "tasks",     label: "Tasks" },
   { id: "focus",     label: "Focus" },
+  { id: "browser",   label: "Browser" },
   { id: "debug",     label: "Debug" },
 ];
 
@@ -328,6 +329,60 @@ function Tasks({ snapshot }) {
   `;
 }
 
+function Browser({ snapshot }) {
+  const browser = snapshot.browser || {};
+  const url = browser.url || "";
+  const title = browser.title || "";
+  const [iframeBlocked, setIframeBlocked] = useState(false);
+  const [loadStart, setLoadStart] = useState(0);
+  useEffect(() => {
+    setIframeBlocked(false);
+    setLoadStart(Date.now());
+  }, [url]);
+  // Some sites silently fail in iframes (X-Frame-Options: DENY,
+  // CSP frame-ancestors). The iframe's onload fires either way, but
+  // for blocked frames the document is empty. We can't read the
+  // contentDocument cross-origin, so use a heuristic: if onload
+  // hasn't fired within 8s assume blocked.
+  useEffect(() => {
+    if (!url) return;
+    const t = setTimeout(() => setIframeBlocked(true), 8000);
+    return () => clearTimeout(t);
+  }, [url, loadStart]);
+  if (!url) {
+    return html`
+      <div class="p-6 h-full flex flex-col items-center justify-center text-mute">
+        <div class="text-sm italic">No page open. Ask the agent to pull up a URL.</div>
+      </div>
+    `;
+  }
+  return html`
+    <div class="p-6 h-full flex flex-col">
+      <div class="flex items-center justify-between mb-3 gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-medium text-ink truncate">${title || url}</div>
+          <a href=${url} target="_blank" rel="noreferrer noopener"
+             class="text-[11px] text-mute hover:text-accent truncate block">${url}</a>
+        </div>
+        ${iframeBlocked ? html`
+          <a href=${url} target="_blank" rel="noreferrer noopener"
+             class="text-[11px] uppercase tracking-[0.12em] text-warn px-2 py-1 rounded ring-1 ring-warn/40 bg-warn/10 hover:bg-warn/20 shrink-0">
+            site blocked iframe — open in new tab
+          </a>` : null}
+      </div>
+      <div class="flex-1 bg-paper border border-line rounded-xl overflow-hidden relative">
+        <iframe
+          src=${url}
+          class="w-full h-full bg-white"
+          referrerpolicy="no-referrer"
+          sandbox="allow-scripts allow-forms allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+          onLoad=${() => setIframeBlocked(false)}
+        ></iframe>
+      </div>
+    </div>
+  `;
+}
+
 function Focus({ snapshot }) {
   const ref = useRef(null);
   const focus = snapshot.focus || {};
@@ -424,6 +479,10 @@ function App() {
           next.focus = { ...(prev.focus||{}), session_id: evt.session_id, done: !!evt.done };
           if (evt.tab) next.active_tab = evt.tab;
         }
+        if (evt.event === "browser") {
+          next.browser = { url: evt.url || "", title: evt.title || "" };
+          if (evt.tab) next.active_tab = evt.tab;
+        }
         if (evt.event === "user_driving") next.user_driving = !!evt.driving;
         return next;
       });
@@ -492,6 +551,7 @@ function App() {
     case "notes":     body = html`<${Notes}     snapshot=${snap}/>`; break;
     case "tasks":     body = html`<${Tasks}     snapshot=${snap}/>`; break;
     case "focus":     body = html`<${Focus}     snapshot=${snap}/>`; break;
+    case "browser":   body = html`<${Browser}   snapshot=${snap}/>`; break;
     case "debug":     body = html`<${Debug}     snapshot=${snap}/>`; break;
     default:          body = html`<${Dashboard} snapshot=${snap}/>`; break;
   }
