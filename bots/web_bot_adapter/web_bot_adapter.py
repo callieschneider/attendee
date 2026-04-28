@@ -591,10 +591,12 @@ class WebBotAdapter(BotAdapter):
 
         # Canvas-rebuild Phase 4 (Present mode): when Meet asks Chrome for a
         # screen-share source via getDisplayMedia, auto-pick the canvas tab so
-        # the bot can present its own canvas without a UI dialog. Requires the
-        # canvas page <title> to start with "Clever Star · canvas" (set in the
-        # canvas_v2 template).
-        options.add_argument('--auto-select-desktop-capture-source=Clever Star · canvas')
+        # the bot can present its own canvas without a UI dialog. The match
+        # value MUST be ASCII — Chromium's CLI flag parser mangles multi-byte
+        # characters (we observed the middle-dot `·` failing to match the tab
+        # title on macOS Chrome). The canvas page <title> is "Clever Star
+        # Canvas" (see agent/templates/agent/canvas_v2.html).
+        options.add_argument('--auto-select-desktop-capture-source=Clever Star Canvas')
 
         if os.getenv("ENABLE_CHROME_SANDBOX", "false").lower() != "true":
             options.add_argument("--no-sandbox")
