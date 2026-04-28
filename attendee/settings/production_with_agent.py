@@ -58,6 +58,10 @@ AGENT_MMR_LAMBDA = float(os.getenv("AGENT_MMR_LAMBDA", "0.7"))
 # ---- Attendee webhook secret (for HMAC verification) ----
 ATTENDEE_WEBHOOK_SECRET = os.getenv("ATTENDEE_WEBHOOK_SECRET", "")
 
+# ---- Test harness: token for /agent/debug/inject-utterance ----
+# When unset (the default), the endpoint returns 403 unconditionally.
+AGENT_DEBUG_TOKEN = os.getenv("AGENT_DEBUG_TOKEN", "")
+
 # ---- Bridge + Calendar settings ----
 BRIDGE_DOMAIN = os.getenv("BRIDGE_DOMAIN", "")
 AGENT_APP_URL = os.getenv("AGENT_APP_URL", "https://meeting-agent-web-production.up.railway.app")

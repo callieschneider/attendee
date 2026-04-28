@@ -1,0 +1,103 @@
+{
+  "comment": "Test cases for the overnight supervisor. Each case injects an utterance via Layer 1 and asserts that state.json or action_log changed in some expected way within `wait_seconds`.",
+  "priority_1_tool_reliability": [
+    {
+      "id": "p1.notes.basic",
+      "category": "notes",
+      "utterance": "Add a note to the meeting that says: pricing pilot kicks off next Tuesday.",
+      "expect": {
+        "tool_called": ["update_notes"],
+        "notes_md_contains": "pricing pilot",
+        "wait_seconds": 12
+      }
+    },
+    {
+      "id": "p1.notes.append",
+      "category": "notes",
+      "utterance": "Also add a note: bring a demo to the kickoff.",
+      "expect": {
+        "tool_called": ["update_notes"],
+        "notes_md_contains": "demo",
+        "wait_seconds": 12
+      }
+    },
+    {
+      "id": "p1.dashboard.update",
+      "category": "dashboard",
+      "utterance": "Update the dashboard: show the kickoff is on Tuesday and we have three open follow-ups.",
+      "expect": {
+        "tool_called": ["update_dashboard"],
+        "dashboard_changed": true,
+        "wait_seconds": 12
+      }
+    },
+    {
+      "id": "p1.navigate.notes",
+      "category": "navigate",
+      "utterance": "Switch to the notes tab.",
+      "expect": {
+        "tool_called": ["navigate_canvas"],
+        "active_tab": "notes",
+        "wait_seconds": 8
+      }
+    },
+    {
+      "id": "p1.navigate.tasks",
+      "category": "navigate",
+      "utterance": "Now show me the tasks tab.",
+      "expect": {
+        "tool_called": ["navigate_canvas"],
+        "active_tab": "tasks",
+        "wait_seconds": 8
+      }
+    },
+    {
+      "id": "p1.think_deep.basic",
+      "category": "think_deep",
+      "utterance": "Think deeply about the tradeoffs of charging per-seat versus per-meeting for an AI meeting tool.",
+      "expect": {
+        "tool_called": ["think_deep"],
+        "focus_text_nonempty": true,
+        "wait_seconds": 30
+      }
+    },
+    {
+      "id": "p1.create_visual.chart",
+      "category": "create_visual",
+      "utterance": "Make a small bar chart comparing four pricing tiers, ranging from twenty to two hundred dollars.",
+      "expect": {
+        "tool_called": ["create_visual"],
+        "wait_seconds": 15
+      }
+    },
+    {
+      "id": "p1.screen_share.start",
+      "category": "screen_share",
+      "utterance": "Go ahead and share your screen so we can all see the canvas.",
+      "expect": {
+        "tool_called": ["screen_share_canvas"],
+        "wait_seconds": 12
+      }
+    }
+  ],
+  "priority_3_echo_loop": [
+    {
+      "id": "p3.echo.short",
+      "category": "echo",
+      "utterance": "Hello Cleverstar, can you hear me?",
+      "expect": {
+        "single_response": true,
+        "wait_seconds": 15
+      }
+    },
+    {
+      "id": "p3.echo.medium",
+      "category": "echo",
+      "utterance": "Tell me a one-sentence summary of what a soul document is.",
+      "expect": {
+        "single_response": true,
+        "wait_seconds": 20
+      }
+    }
+  ]
+}
