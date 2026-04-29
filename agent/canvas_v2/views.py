@@ -100,6 +100,55 @@ def canvas_state_json(request: HttpRequest, bot_id: str) -> HttpResponse:
     return JsonResponse(snapshot(bot_id))
 
 
+def canvas_latest_frame(request: HttpRequest, bot_id: str) -> HttpResponse:
+    """
+    Return the most recent canvas screenshot as image/jpeg.
+
+    Used by the screen-share override script injected into the bot's
+    Meet tab. Meet's `getDisplayMedia` is hijacked to return a
+    canvas-backed MediaStream that pulls frames from this endpoint.
+    Hence the explicit CORS header — Meet's origin needs to fetch
+    cross-origin and the resulting <img> needs `crossOrigin=anonymous`
+    to avoid the canvas being marked tainted.
+
+    Source: the canvas pump (agent/canvas/pump_daemon.py) already
+    captures the bot's canvas tab as PNG via headless Chrome and
+    POSTs to Attendee's `/output_image`. We sniff the same chromedriver
+    here and re-encode as JPEG for stream-friendly bandwidth.
+    """
+    from django.http import HttpResponse as _Resp
+
+    try:
+        from agent.canvas.pump import _capture_canvas_png
+    except Exception:
+        log.exception("canvas_latest_frame: pump import failed bot=%s", bot_id)
+        return _Resp(status=503)
+
+    png = _capture_canvas_png(bot_id)
+    if not png:
+        return _Resp(status=503)
+
+    # Re-encode PNG -> JPEG for ~5-8x smaller frames at perceptually
+    # equivalent quality (canvases are mostly flat colors; JPEG is fine).
+    try:
+        from io import BytesIO
+        from PIL import Image
+        im = Image.open(BytesIO(png)).convert("RGB")
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=78, optimize=True)
+        body = buf.getvalue()
+        mime = "image/jpeg"
+    except Exception:
+        body = png
+        mime = "image/png"
+
+    resp = _Resp(body, content_type=mime)
+    resp["Cache-Control"] = "no-store, max-age=0"
+    resp["Access-Control-Allow-Origin"] = "*"
+    resp["Access-Control-Allow-Methods"] = "GET"
+    return resp
+
+
 def _redis_for_pubsub():
     try:
         import redis

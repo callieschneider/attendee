@@ -1078,6 +1078,113 @@ class BotController:
             logger.warning(f"Error playing video media request: {e}")
             BotMediaRequestManager.set_media_request_failed_to_play(oldest_enqueued_media_request)
 
+    def _inject_screenshare_override_safely(self):
+        """
+        Override `navigator.mediaDevices.getDisplayMedia` in the bot's
+        Meet tab so that when Meet calls it, we return a MediaStream
+        synthesized from the agent's canvas content rather than the
+        useless fake stream Chrome returns under
+        --use-fake-device-for-media-stream.
+
+        The override:
+          1. Creates a hidden <canvas>.
+          2. Loads /agent/canvas/v2/<bot_id>/frame.jpg every ~120ms.
+          3. Draws each frame into the <canvas>.
+          4. canvas.captureStream(N) returns a MediaStream.
+          5. Meet receives that as the "shared screen."
+
+        Injected via Chrome DevTools Protocol's
+        Page.addScriptToEvaluateOnNewDocument so it runs BEFORE Meet's
+        own scripts on every navigation. Best-effort.
+        """
+        try:
+            from django.conf import settings
+            api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
+            if not api_base:
+                logger.info("share_override: AGENT_APP_URL not set; skipping")
+                return
+            adapter = getattr(self, "adapter", None)
+            driver = getattr(adapter, "driver", None) if adapter else None
+            if driver is None:
+                logger.info("share_override: adapter has no driver; skipping")
+                return
+            bot_id = self.bot_in_db.object_id
+            frame_url = f"{api_base}/agent/canvas/v2/{bot_id}/frame.jpg"
+
+            override_js = (
+                "(function(){"
+                "if (window.__cleverstar_share_overridden) return;"
+                "window.__cleverstar_share_overridden = true;"
+                "const FRAME_URL = " + repr(frame_url) + ";"
+                "const W = 1920, H = 1080, FPS = 12;"
+                ""
+                "function createStream() {"
+                "  const canvas = document.createElement('canvas');"
+                "  canvas.width = W; canvas.height = H;"
+                "  const ctx = canvas.getContext('2d');"
+                "  ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, W, H);"
+                "  const img = new Image();"
+                "  img.crossOrigin = 'anonymous';"
+                "  let stopped = false;"
+                "  let inFlight = false;"
+                "  function tick() {"
+                "    if (stopped) return;"
+                "    if (!inFlight) {"
+                "      inFlight = true;"
+                "      img.onload = function() { inFlight = false;"
+                "        try { ctx.drawImage(img, 0, 0, W, H); } catch(e) {}"
+                "      };"
+                "      img.onerror = function() { inFlight = false; };"
+                "      img.src = FRAME_URL + '?t=' + Date.now();"
+                "    }"
+                "    setTimeout(tick, Math.floor(1000 / FPS));"
+                "  }"
+                "  tick();"
+                "  const stream = canvas.captureStream(FPS);"
+                "  stream.addEventListener('inactive', function() { stopped = true; });"
+                "  stream.getVideoTracks().forEach(function(t) {"
+                "    t.addEventListener('ended', function() { stopped = true; });"
+                "  });"
+                "  return stream;"
+                "}"
+                ""
+                "const md = navigator.mediaDevices;"
+                "if (md && md.getDisplayMedia) {"
+                "  md.getDisplayMedia = async function(opts) {"
+                "    console.log('[cleverstar] getDisplayMedia overridden, returning canvas stream');"
+                "    return createStream();"
+                "  };"
+                "}"
+                "})();"
+            )
+
+            # Page.addScriptToEvaluateOnNewDocument runs the script on
+            # every navigation BEFORE the page's own JS — survives Meet's
+            # own setup. This is the cleanest CDP path through Selenium.
+            try:
+                driver.execute_cdp_cmd(
+                    "Page.addScriptToEvaluateOnNewDocument",
+                    {"source": override_js},
+                )
+                logger.info(
+                    "share_override: installed (frame_url=%s)",
+                    frame_url,
+                )
+            except Exception:
+                logger.exception("share_override: addScriptToEvaluateOnNewDocument failed")
+                return
+
+            # Also inject into the CURRENT (already-loaded) Meet page so
+            # the override applies without a reload. addScriptTo... only
+            # affects future navigations.
+            try:
+                driver.execute_script(override_js)
+                logger.info("share_override: also injected into current document")
+            except Exception:
+                logger.warning("share_override: current-doc inject failed", exc_info=True)
+        except Exception as e:
+            logger.warning("share_override: setup failed (non-fatal): %s", e)
+
     def _open_canvas_tab_for_present_mode_safely(self):
         """
         Open the canvas web app as a second tab in the bot's Chrome.
@@ -2487,10 +2594,16 @@ class BotController:
                 event_type=BotEventTypes.BOT_RECORDING_PERMISSION_GRANTED,
             )
 
-            # Canvas-rebuild Phase 3/4: open the canvas web app as a second
-            # Chrome tab in the bot's browser. Required for Phase 4 Present-
-            # mode screen sharing (the tab has to exist in this Chrome
-            # instance for getDisplayMedia / Meet's tab-picker to see it).
+            # Canvas screen-share: override navigator.mediaDevices.getDisplayMedia
+            # in the bot's Meet tab so that when Meet asks for a screen
+            # capture, we return a real MediaStream backed by the agent's
+            # canvas frames (--use-fake-device-for-media-stream would
+            # otherwise return a useless synthetic pattern).
+            self._inject_screenshare_override_safely()
+            # Phase 3/4 left this in place but the override above
+            # supersedes the need for the Chrome tab itself to be the
+            # share source. Keeping the canvas tab open is harmless and
+            # provides a fallback if we ever revert the override.
             self._open_canvas_tab_for_present_mode_safely()
             # Drop the canvas link into the meeting chat ~6s after join so
             # humans can open the canvas in their own browser.
