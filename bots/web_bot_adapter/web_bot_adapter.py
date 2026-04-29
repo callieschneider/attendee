@@ -583,7 +583,24 @@ class WebBotAdapter(BotAdapter):
         options.add_argument("--start-fullscreen")
         # options.add_argument('--headless=new')
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
+        # Load the Clever Star tab-bridge extension. It overrides
+        # navigator.mediaDevices.getDisplayMedia in the Meet tab to
+        # return a real chrome.tabCapture stream of the canvas tab.
+        # We can't blanket-disable extensions or this one won't load,
+        # so we use --disable-extensions-except to whitelist only
+        # ours. If the extension dir is missing (e.g. local dev not
+        # in the container), skip silently.
+        cleverstar_extension_path = os.environ.get(
+            "CLEVERSTAR_EXTENSION_PATH",
+            "/attendee/bots/cleverstar_extension",
+        )
+        if os.path.isdir(cleverstar_extension_path):
+            options.add_argument(f"--load-extension={cleverstar_extension_path}")
+            options.add_argument(f"--disable-extensions-except={cleverstar_extension_path}")
+            logger.info("Loaded Clever Star tab-bridge extension from %s", cleverstar_extension_path)
+        else:
+            options.add_argument("--disable-extensions")
+            logger.warning("Clever Star extension dir not found at %s; running with --disable-extensions", cleverstar_extension_path)
         options.add_argument("--disable-application-cache")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-blink-features=AutomationControlled")
