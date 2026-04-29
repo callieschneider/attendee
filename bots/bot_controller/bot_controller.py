@@ -1170,6 +1170,45 @@ class BotController:
         except Exception as e:
             logger.warning("canvas_chat: schedule failed (non-fatal): %s", e)
 
+    def _click_stop_presenting(self, driver):
+        """
+        Click whatever "Stop presenting" / "Stop sharing" button Meet is
+        showing right now. Uses the same multi-strategy approach as the
+        main toggle JS but scoped to only the stop labels and with no
+        post-click diagnostics. Returns True if a button was clicked.
+        """
+        js = r"""
+            const labels = ["Stop presenting", "Stop sharing",
+                            "Stop sharing screen", "Stop screen share"];
+            // 1. aria-label
+            for (const l of labels) {
+                try {
+                    const btn = document.querySelector(
+                        `button[aria-label*="${l}" i]`);
+                    if (btn) { btn.click(); return "aria:" + l; }
+                } catch (e) {}
+            }
+            // 2. innerText scan
+            const all = Array.from(document.querySelectorAll('button'));
+            for (const btn of all) {
+                const t = (btn.innerText || btn.textContent || "")
+                    .trim().toLowerCase();
+                for (const l of labels) {
+                    if (t.includes(l.toLowerCase())) {
+                        try { btn.click(); return "text:" + l; } catch (e) {}
+                    }
+                }
+            }
+            return null;
+        """
+        try:
+            r = driver.execute_script(js)
+            logger.info("canvas_share: pre-stop click result=%s", r)
+            return bool(r)
+        except Exception as e:
+            logger.warning("canvas_share: pre-stop click failed: %s", e)
+            return False
+
     def _toggle_canvas_screenshare(self, on: bool):
         """
         Phase 4: drive Meet's "Share screen" / "Stop presenting" button.
@@ -1232,6 +1271,33 @@ class BotController:
                 return
 
             driver.switch_to.window(meet_handle)
+
+            # When STARTING a share, first check if we're already
+            # presenting from a stale attempt. If so, stop cleanly and
+            # wait before starting fresh — otherwise our "Share screen"
+            # button finder matches the in-presenter annotation panel
+            # (we caught this exact failure in production: the click
+            # opened "disappearing ink / try annotating" tools instead
+            # of a new share-source chooser).
+            if on:
+                try:
+                    already_presenting = bool(driver.execute_script(
+                        "return !!document.querySelector('"
+                        "[aria-label*=\"You are presenting\" i],"
+                        "[aria-label*=\"You\\u2019re presenting\" i]"
+                        "');"
+                    ))
+                except Exception:
+                    already_presenting = False
+                if already_presenting:
+                    logger.info(
+                        "canvas_share: bot=%s is already presenting from a "
+                        "stale share — stopping it before starting fresh",
+                        self.bot_in_db.object_id,
+                    )
+                    self._click_stop_presenting(driver)
+                    import time as _time
+                    _time.sleep(1.5)
 
             # Robust button-finder with four fallback strategies. Meet's
             # button labels and DOM shape change over time and across
