@@ -1238,14 +1238,19 @@ class BotController:
             # locales; we try aria-label, data-tooltip, XPath text match,
             # and finally innerText scan. The function returns whichever
             # strategy succeeded so we log the path that worked.
+            #
+            # Note: labels with apostrophes (e.g. "You're presenting") are
+            # safe in CSS selectors because we wrap them in double quotes
+            # there, but XPath single-quoted literals can't contain '.
+            # `xpathLit` builds a concat() expression that handles it.
             js = r"""
                 const ON = arguments[0];
                 const labels = ON
                     ? ["Present now", "Share screen", "Share now",
-                       "Présent now", "Présenter maintenant"]
+                       "Présenter maintenant"]
                     : ["Stop presenting", "Stop sharing",
                        "Stop sharing screen", "Stop screen share",
-                       "You're presenting"];
+                       "Youre presenting", "you are presenting"];
 
                 function tryClick(strategyName, btn, label) {
                     if (!btn) return null;
@@ -1253,18 +1258,33 @@ class BotController:
                     catch (e) { return null; }
                 }
 
+                // Convert any string into a safe XPath string literal.
+                // Handles apostrophes via concat(...) trick.
+                function xpathLit(s) {
+                    if (s.indexOf("'") < 0) return "'" + s + "'";
+                    if (s.indexOf('"') < 0) return '"' + s + '"';
+                    const parts = s.split("'");
+                    return "concat('" + parts.join("',\"'\",'") + "')";
+                }
+
                 // 1. aria-label substring (case-insensitive)
                 for (const l of labels) {
-                    const btn = document.querySelector(
-                        `button[aria-label*="${l}" i]`);
+                    let btn = null;
+                    try {
+                        btn = document.querySelector(
+                            `button[aria-label*="${l}" i]`);
+                    } catch (e) { /* fall through */ }
                     const r = tryClick("aria", btn, l);
                     if (r) return r;
                 }
 
                 // 2. data-tooltip substring
                 for (const l of labels) {
-                    const btn = document.querySelector(
-                        `button[data-tooltip*="${l}" i]`);
+                    let btn = null;
+                    try {
+                        btn = document.querySelector(
+                            `button[data-tooltip*="${l}" i]`);
+                    } catch (e) { /* fall through */ }
                     const r = tryClick("tooltip", btn, l);
                     if (r) return r;
                 }
@@ -1273,11 +1293,15 @@ class BotController:
                 const lower = "abcdefghijklmnopqrstuvwxyz";
                 const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
                 for (const l of labels) {
-                    const xp = `//button[contains(translate(string(.), '${upper}', '${lower}'), '${l.toLowerCase()}')]`;
-                    const node = document.evaluate(
-                        xp, document, null,
-                        XPathResult.FIRST_ORDERED_NODE_TYPE, null
-                    ).singleNodeValue;
+                    const lit = xpathLit(l.toLowerCase());
+                    const xp = `//button[contains(translate(string(.), '${upper}', '${lower}'), ${lit})]`;
+                    let node = null;
+                    try {
+                        node = document.evaluate(
+                            xp, document, null,
+                            XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                        ).singleNodeValue;
+                    } catch (e) { /* skip bad XPath, try next */ }
                     const r = tryClick("xpath", node, l);
                     if (r) return r;
                 }
@@ -1306,27 +1330,100 @@ class BotController:
             # lock onto our canvas tab.
             if on and result is not None:
                 import time as _time
-                _time.sleep(0.4)
+                # Meet's "Share screen" opens a chooser panel after a
+                # render cycle. Poll for ~3s for the chooser to appear
+                # before giving up.
                 tab_choice_js = r"""
-                    const labels = ["A tab", "Chrome tab", "A Chrome tab",
-                                    "Browser tab"];
-                    const all = Array.from(document.querySelectorAll(
-                        'button, [role="menuitem"], li'));
-                    for (const el of all) {
-                        const t = (el.innerText || el.textContent || "")
-                            .trim().toLowerCase();
-                        for (const l of labels) {
-                            if (t === l.toLowerCase() ||
-                                t.startsWith(l.toLowerCase() + "\n") ||
-                                t.startsWith(l.toLowerCase() + " ")) {
-                                el.click();
-                                return l;
+                    // Returns either:
+                    //   {clicked: "<label>"} on success
+                    //   {clicked: null, candidates: [...]} on failure
+                    //     (so we can see what the chooser actually has)
+
+                    // Phrases that mean "share a tab" in various Meet
+                    // variants. Match on any clickable element whose
+                    // accessible name OR visible text contains them.
+                    const phrases = [
+                        "a tab", "chrome tab", "browser tab", "tab",
+                        "share a tab", "share tab",
+                    ];
+
+                    function visibleText(el) {
+                        const t = (el.innerText || el.textContent || "").trim();
+                        return t.replace(/\s+/g, " ").toLowerCase();
+                    }
+                    function ariaName(el) {
+                        return (el.getAttribute && (
+                            el.getAttribute("aria-label") ||
+                            el.getAttribute("data-tooltip") ||
+                            ""
+                        )).trim().toLowerCase();
+                    }
+                    function isClickable(el) {
+                        const tn = (el.tagName || "").toLowerCase();
+                        if (tn === "button" || tn === "a") return true;
+                        const role = (el.getAttribute && el.getAttribute("role") || "");
+                        if (["button","menuitem","menuitemradio","listitem","option","tab"].includes(role)) return true;
+                        if (el.onclick) return true;
+                        // Meet wraps share-source choices in clickable divs.
+                        const cs = window.getComputedStyle(el);
+                        if (cs.cursor === "pointer" && el.getClientRects().length) return true;
+                        return false;
+                    }
+                    function visible(el) {
+                        if (!el.getClientRects().length) return false;
+                        const cs = window.getComputedStyle(el);
+                        if (cs.visibility === "hidden" || cs.display === "none") return false;
+                        return true;
+                    }
+
+                    // Try clicking the first element whose name/text
+                    // matches "a tab" specifically (not just "tab" — we
+                    // don't want to click Meet's existing tab list).
+                    const all = Array.from(document.querySelectorAll("*"))
+                        .filter(visible)
+                        .filter(isClickable);
+
+                    // Most-specific phrase first, least-specific last.
+                    for (const p of phrases) {
+                        for (const el of all) {
+                            const t = visibleText(el);
+                            const a = ariaName(el);
+                            // Equality / startsWith over text and aria.
+                            if (t === p || a === p ||
+                                t.startsWith(p + " ") || a.startsWith(p + " ") ||
+                                t.startsWith(p + "\n") ||
+                                // Meet's chooser tiles have label inside a
+                                // child element so the parent's full text
+                                // is "A tab\nKnow which tab to share?"
+                                t.split("\n")[0].trim() === p) {
+                                try { el.click(); return {clicked: p, viaText: t.slice(0,80), viaAria: a.slice(0,80)}; }
+                                catch (e) { /* try next */ }
                             }
                         }
                     }
-                    return null;
+
+                    // Nothing matched — return a sample of clickable
+                    // candidates so we can see what's actually on screen.
+                    const sample = all.slice(0, 30).map(el => ({
+                        tag: el.tagName.toLowerCase(),
+                        role: el.getAttribute && el.getAttribute("role") || "",
+                        aria: ariaName(el).slice(0, 80),
+                        text: visibleText(el).slice(0, 80),
+                    })).filter(c => c.text || c.aria);
+                    return {clicked: null, candidates: sample};
                 """
-                tab_result = driver.execute_script(tab_choice_js)
+
+                tab_result = None
+                for attempt in range(10):  # ~3s of polling
+                    _time.sleep(0.3)
+                    try:
+                        tab_result = driver.execute_script(tab_choice_js)
+                    except Exception as e:
+                        logger.warning("canvas_share: tab-choice JS error: %s", e)
+                        tab_result = None
+                        continue
+                    if isinstance(tab_result, dict) and tab_result.get("clicked"):
+                        break
                 logger.info("canvas_share: tab-choice click result=%s", tab_result)
 
                 # ── DIAGNOSTIC: 3s after the click, ask Meet's DOM what's
@@ -1337,28 +1434,29 @@ class BotController:
                 # effect but the WRONG capture target was selected.
                 _time.sleep(3.0)
                 try:
-                    diag_js = r"""
-                        const out = {};
-                        // 1. What's Meet's UI saying about presenting?
-                        const presenting = document.querySelector(
-                            '[aria-label*="presenting" i],'
-                            + '[aria-label*="you\\'re sharing" i]'
-                        );
-                        out.presenting_indicator = presenting
-                            ? presenting.getAttribute('aria-label')
-                            : null;
-                        out.body_has_share_text = (document.body.innerText || '').includes('You are presenting')
-                            || (document.body.innerText || '').includes("You're presenting");
-                        // 2. Any active getDisplayMedia tracks visible?
-                        const vids = Array.from(document.querySelectorAll('video'));
-                        out.video_elems = vids.length;
-                        out.video_with_src = vids.filter(v => v.srcObject || v.src).length;
-                        // 3. URL + title of THIS tab so we know we're on
-                        //    the right one.
-                        out.this_url = location.href;
-                        out.this_title = document.title;
-                        return out;
-                    """
+                    # Use a clean string with no nested apostrophes — the
+                    # earlier version had a `\\'` escape that crashed the
+                    # JS parser inside execute_script.
+                    diag_js = (
+                        "const out = {};"
+                        "const sel = '[aria-label*=\"presenting\" i], "
+                        "[aria-label*=\"sharing\" i]';"
+                        "const presenting = document.querySelector(sel);"
+                        "out.presenting_indicator = presenting "
+                        "? presenting.getAttribute('aria-label') : null;"
+                        "const txt = document.body.innerText || '';"
+                        "out.body_has_share_text = "
+                        "txt.toLowerCase().indexOf('you are presenting') >= 0 || "
+                        "txt.toLowerCase().indexOf('youre presenting') >= 0;"
+                        "const vids = Array.from("
+                        "document.querySelectorAll('video'));"
+                        "out.video_elems = vids.length;"
+                        "out.video_with_src = vids.filter("
+                        "function(v){return v.srcObject || v.src;}).length;"
+                        "out.this_url = location.href;"
+                        "out.this_title = document.title;"
+                        "return out;"
+                    )
                     diag = driver.execute_script(diag_js)
                     logger.info("canvas_share: post-click diag bot=%s diag=%s",
                                 self.bot_in_db.object_id, diag)
