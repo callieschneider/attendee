@@ -1599,6 +1599,47 @@ class BotController:
                         break
                 logger.info("canvas_share: tab-choice click result=%s", tab_result)
 
+                # If the ONLY candidate is an "OK" button, Meet popped a
+                # warning/info dialog (likely "Screen sharing not
+                # available" or similar). Click it to dismiss so the
+                # next share attempt has a clean state, and also dump
+                # the visible dialog text so we know what Meet is
+                # actually telling us.
+                if isinstance(tab_result, dict) and not tab_result.get("clicked"):
+                    cands = tab_result.get("candidates", []) or []
+                    if cands and all(
+                        (c.get("text") or "").strip().lower() in ("ok", "okay", "got it", "dismiss")
+                        for c in cands if c.get("text")
+                    ):
+                        try:
+                            dialog_text = driver.execute_script(
+                                "const d = document.querySelector("
+                                "'[role=\"dialog\"], [role=\"alertdialog\"]');"
+                                "if (!d) return null;"
+                                "const t = (d.innerText || d.textContent || '')"
+                                "  .trim().replace(/\\s+/g, ' ').slice(0, 400);"
+                                "return t;"
+                            )
+                            logger.info("canvas_share: dialog text after share-click: %s", dialog_text)
+                        except Exception as e:
+                            logger.warning("canvas_share: dialog text dump failed: %s", e)
+                        # Click OK so we don't leave Meet stuck on a
+                        # modal forever.
+                        try:
+                            driver.execute_script(
+                                "const btns = Array.from(document.querySelectorAll('button'));"
+                                "for (const b of btns) {"
+                                "  const t = (b.innerText || b.textContent || '').trim().toLowerCase();"
+                                "  if (t === 'ok' || t === 'okay' || t === 'got it' || t === 'dismiss') {"
+                                "    b.click(); return t;"
+                                "  }"
+                                "}"
+                                "return null;"
+                            )
+                            logger.info("canvas_share: dismissed OK dialog")
+                        except Exception:
+                            pass
+
                 # ── DIAGNOSTIC: 3s after the click, ask Meet's DOM what's
                 # actually being presented and dump every visible tab the
                 # capture picker could have picked from. We log this even
