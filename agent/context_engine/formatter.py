@@ -51,6 +51,12 @@ CHARTS / SIMPLE VISUALS — create_visual / update_visual
   - Update, don't replace: if a chart is already up and the user refines it,
     call update_visual.
 
+CANVAS THEME — set_canvas_theme
+  - "Switch to light mode" / "go dark" / "too bright" / "easier on
+    the eyes" → call set_canvas_theme with theme='light' or 'dark'.
+    Default is dark. The change is instant for everyone viewing the
+    canvas (their browser, your video tile, your screen-share).
+
 CANVAS WRITES — update_notes / update_dashboard / navigate_canvas / open_url / close_url
   - "Add a note that…" / "remember…" / "log that…" → call update_notes
     (operation defaults to append). Use markdown — short bullets or one

@@ -147,6 +147,22 @@ def update_dashboard(bot_id: str, payload: dict) -> dict:
     return {"ok": True, "payload": merged}
 
 
+VALID_THEMES = ("dark", "light")
+
+
+def set_theme(bot_id: str, theme: str) -> dict:
+    if theme not in VALID_THEMES:
+        return {"error": f"theme must be one of {VALID_THEMES}"}
+    with transaction.atomic():
+        state = _get_or_create_state(bot_id)
+        if state is None:
+            return {"error": "no bot for that id"}
+        state.theme = theme
+        state.save(update_fields=["theme", "updated_at"])
+    publish_state_event(bot_id, {"event": "theme", "theme": theme})
+    return {"ok": True, "theme": theme}
+
+
 def open_url(bot_id: str, url: str, title: str = "") -> dict:
     """Set the canvas browser URL and switch to the browser tab."""
     if not url:
@@ -322,6 +338,7 @@ def snapshot(bot_id: str) -> dict:
         "bot_id": bot_id,
         "now": timezone.now().isoformat(),
         "active_tab": (state.active_tab if state else "dashboard"),
+        "theme": (state.theme if state else "dark"),
         "user_driving": bool(state and state.user_driving),
         "notes_md": (state.notes_md if state else ""),
         "focus": {

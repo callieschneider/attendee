@@ -664,6 +664,16 @@ class CanvasState(models.Model):
     browser_url = models.URLField(max_length=2048, blank=True, default="")
     browser_title = models.CharField(max_length=255, blank=True, default="")
 
+    # Visual theme — light or dark. Default dark since the canvas
+    # historically lived in dark mode. Switchable via the
+    # `set_canvas_theme` tool or any user-driving canvas client.
+    THEME_DARK = "dark"
+    THEME_LIGHT = "light"
+    THEME_CHOICES = [(THEME_DARK, "Dark"), (THEME_LIGHT, "Light")]
+    theme = models.CharField(
+        max_length=8, choices=THEME_CHOICES, default=THEME_DARK,
+    )
+
     # When a non-bot WS client (the user's own browser) is connected the agent
     # treats canvas navigation as user-driven and stops auto-switching tabs.
     user_driving = models.BooleanField(default=False)
