@@ -15,11 +15,18 @@ log = logging.getLogger("agent.live_session.audio_gate")
 
 
 class AudioGate:
-    def __init__(self, bot_id: str):
+    def __init__(self, bot_id: str, on_transition=None):
+        """
+        on_transition: optional async callable invoked ONLY on real
+        state changes — `await on_transition("open" | "close", reason)`.
+        Extends and no-op closes do not fire it. The manager uses
+        this to play wake/sleep chimes audible in the meeting.
+        """
         self.bot_id = bot_id
         self.is_open = False
         self._auto_close_task: Optional[asyncio.Task] = None
         self._reason: str = ""
+        self._on_transition = on_transition
 
     @property
     def reason(self) -> str:
@@ -35,6 +42,11 @@ class AudioGate:
         self._auto_close_task = asyncio.create_task(self._auto_close(ttl_seconds))
         if not was_open:
             log.info("audio_gate: OPEN bot=%s reason=%s ttl=%ds", self.bot_id, reason, ttl_seconds)
+            if self._on_transition is not None:
+                try:
+                    await self._on_transition("open", reason)
+                except Exception:
+                    log.exception("audio_gate: on_transition(open) failed bot=%s", self.bot_id)
         else:
             log.info("audio_gate: EXTEND bot=%s reason=%s ttl=%ds", self.bot_id, reason, ttl_seconds)
 
@@ -66,6 +78,11 @@ class AudioGate:
         except Exception:
             log.exception("audio_gate: clear_gate_state failed bot=%s", self.bot_id)
         log.info("audio_gate: CLOSE bot=%s reason=%s", self.bot_id, reason)
+        if self._on_transition is not None:
+            try:
+                await self._on_transition("close", reason)
+            except Exception:
+                log.exception("audio_gate: on_transition(close) failed bot=%s", self.bot_id)
 
     async def _auto_close(self, ttl_seconds: int) -> None:
         try:

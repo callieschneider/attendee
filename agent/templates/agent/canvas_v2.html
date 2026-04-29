@@ -253,6 +253,7 @@ const TABS = [
   { id: "tasks",     label: "Tasks" },
   { id: "focus",     label: "Focus" },
   { id: "browser",   label: "Browser" },
+  { id: "history",   label: "History" },
   { id: "debug",     label: "Debug" },
 ];
 
@@ -524,6 +525,123 @@ function Browser({ snapshot }) {
   `;
 }
 
+function relativeTime(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  const d = (Date.now() - t) / 1000;
+  if (d < 60) return "just now";
+  if (d < 3600) return Math.floor(d/60) + "m ago";
+  if (d < 86400) return Math.floor(d/3600) + "h ago";
+  if (d < 86400*7) return Math.floor(d/86400) + "d ago";
+  return new Date(t).toLocaleDateString();
+}
+
+function History({ snapshot }) {
+  const hist = snapshot.history || {};
+  const visits    = hist.visits || [];
+  const bookmarks = hist.bookmarks || [];
+  const meetings  = hist.meetings || [];
+  const series    = snapshot.series || null;
+  const [filter, setFilter] = useState("");
+  const f = filter.trim().toLowerCase();
+  const matches = (s) => !f || (s || "").toLowerCase().includes(f);
+
+  const filteredVisits = visits.filter(v => matches(v.url) || matches(v.title));
+  const filteredBookmarks = bookmarks.filter(b =>
+    matches(b.label) || matches(b.url) || matches(b.notes) || (b.tags || []).some(t => matches(t))
+  );
+  const filteredMeetings = meetings.filter(m => matches(m.title) || matches(m.summary));
+
+  return html`
+    <div class="p-6 space-y-5 overflow-y-auto h-full">
+      <div class="flex items-baseline justify-between gap-3 flex-wrap">
+        <div>
+          <div class="text-xs uppercase tracking-[0.18em] text-mute">History</div>
+          <div class="text-sm text-ink mt-1">
+            ${series ? html`<span class="text-mute">series:</span> ${series.title}` : html`<span class="italic text-mute">no series — showing this meeting only</span>`}
+          </div>
+        </div>
+        <input
+          type="text"
+          placeholder="filter URLs, labels, summaries…"
+          value=${filter}
+          onInput=${(e) => setFilter(e.target.value)}
+          class="bg-bg2 border border-line rounded-md px-3 py-1.5 text-sm text-ink placeholder-mute focus:outline-none focus:ring-1 focus:ring-accent w-72"
+        />
+      </div>
+
+      <section>
+        <div class="text-xs uppercase tracking-[0.18em] text-mute mb-2">
+          Bookmarks <span class="text-mute/70 normal-case tracking-normal">· ${filteredBookmarks.length}</span>
+        </div>
+        ${filteredBookmarks.length === 0 ? html`
+          <div class="text-sm text-mute italic">No bookmarks yet. Ask the agent to save a link.</div>
+        ` : html`
+          <ul class="space-y-1.5">
+            ${filteredBookmarks.map(b => html`
+              <li key=${b.id} class="rounded-md border border-line bg-bg2/60 px-3 py-2 hover:border-accent/40 transition-colors">
+                <div class="flex items-baseline justify-between gap-3">
+                  <a href=${b.url} target="_blank" rel="noreferrer noopener" class="font-medium text-ink hover:text-accent text-sm">${b.label}</a>
+                  <span class="text-[10px] uppercase tracking-[0.12em] text-mute shrink-0">${relativeTime(b.updated_at)}</span>
+                </div>
+                <a href=${b.url} target="_blank" rel="noreferrer noopener" class="block text-[11px] text-mute hover:text-accent truncate">${b.url}</a>
+                ${b.notes ? html`<div class="text-xs text-ink/80 mt-1">${b.notes}</div>` : null}
+                ${(b.tags || []).length > 0 ? html`
+                  <div class="mt-1.5 flex gap-1 flex-wrap">
+                    ${b.tags.map(t => html`<span class="text-[10px] uppercase tracking-[0.12em] text-mute px-1.5 py-0.5 rounded ring-1 ring-line">${t}</span>`)}
+                  </div>` : null}
+              </li>
+            `)}
+          </ul>
+        `}
+      </section>
+
+      <section>
+        <div class="text-xs uppercase tracking-[0.18em] text-mute mb-2">
+          Browser history <span class="text-mute/70 normal-case tracking-normal">· ${filteredVisits.length}</span>
+        </div>
+        ${filteredVisits.length === 0 ? html`
+          <div class="text-sm text-mute italic">No pages visited yet.</div>
+        ` : html`
+          <ul class="space-y-1">
+            ${filteredVisits.map((v, i) => html`
+              <li key=${i} class="flex items-baseline gap-3 py-1 border-b border-line/40 last:border-0">
+                <span class="text-[10px] uppercase tracking-[0.12em] text-mute shrink-0 w-16">${relativeTime(v.visited_at)}</span>
+                <a href=${v.url} target="_blank" rel="noreferrer noopener" class="flex-1 truncate text-sm text-ink hover:text-accent">
+                  ${v.title || v.url}
+                </a>
+                <span class="text-[10px] uppercase tracking-[0.12em] text-mute shrink-0">${v.source}</span>
+              </li>
+            `)}
+          </ul>
+        `}
+      </section>
+
+      <section>
+        <div class="text-xs uppercase tracking-[0.18em] text-mute mb-2">
+          Past meetings <span class="text-mute/70 normal-case tracking-normal">· ${filteredMeetings.length}</span>
+        </div>
+        ${filteredMeetings.length === 0 ? html`
+          <div class="text-sm text-mute italic">${series ? "No prior meetings in this series." : "Not in a series."}</div>
+        ` : html`
+          <ul class="space-y-1.5">
+            ${filteredMeetings.map(m => html`
+              <li key=${m.id} class="rounded-md border border-line bg-bg2/60 px-3 py-2">
+                <div class="flex items-baseline justify-between gap-3">
+                  <span class="font-medium text-ink text-sm truncate">${m.title}</span>
+                  <span class="text-[10px] uppercase tracking-[0.12em] text-mute shrink-0">${relativeTime(m.started_at)}</span>
+                </div>
+                ${m.summary ? html`<div class="text-xs text-ink/70 mt-1 line-clamp-3">${m.summary}</div>` : null}
+              </li>
+            `)}
+          </ul>
+        `}
+      </section>
+    </div>
+  `;
+}
+
 function Focus({ snapshot }) {
   const ref = useRef(null);
   const focus = snapshot.focus || {};
@@ -751,6 +869,7 @@ function App() {
     case "tasks":     body = html`<${Tasks}     snapshot=${snap}/>`; break;
     case "focus":     body = html`<${Focus}     snapshot=${snap}/>`; break;
     case "browser":   body = html`<${Browser}   snapshot=${snap}/>`; break;
+    case "history":   body = html`<${History}   snapshot=${snap}/>`; break;
     case "debug":     body = html`<${Debug}     snapshot=${snap}/>`; break;
     default:          body = html`<${Dashboard} snapshot=${snap}/>`; break;
   }

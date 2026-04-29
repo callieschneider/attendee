@@ -33,7 +33,36 @@ def _open_url(inp: dict, ctx: dict) -> dict:
     if not url:
         return {"error": "url required"}
     title = (inp.get("title") or "").strip()
-    return canvas_state.open_url(bot_id, url, title=title)
+    result = canvas_state.open_url(bot_id, url, title=title)
+    # Log to BrowserPageVisit so the page shows up in browser_history
+    # and the canvas History tab. Best-effort — don't fail open_url
+    # if logging breaks.
+    try:
+        _log_browser_visit(bot_id, result.get("url") or url, title, source="open_url")
+    except Exception:
+        log.exception("open_url: history logging failed bot=%s", bot_id)
+    return result
+
+
+def _log_browser_visit(bot_id: str, url: str, title: str, source: str) -> None:
+    from agent.context_engine.layers import resolve_series_id_for_bot
+    from agent.models import BrowserPageVisit, MeetingSeries
+    from bots.models import Bot
+
+    bot = Bot.objects.filter(object_id=bot_id).only("object_id").first()
+    if bot is None:
+        return
+    sid = resolve_series_id_for_bot(bot_id)
+    series = None
+    if sid:
+        series = MeetingSeries.objects.filter(pk=sid).first()
+    BrowserPageVisit.objects.create(
+        bot=bot,
+        series=series,
+        url=url[:2048],
+        title=(title or "")[:512],
+        source=source[:16],
+    )
 
 
 def _close_url(inp: dict, ctx: dict) -> dict:

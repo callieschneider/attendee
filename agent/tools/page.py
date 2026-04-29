@@ -61,6 +61,14 @@ def _page_navigate(inp: dict, ctx: dict) -> dict:
             canvas_state.open_url(bot_id, out.get("url") or url, title=out.get("title") or "")
         except Exception:
             log.exception("page_navigate: canvas_state mirror failed bot=%s", bot_id)
+        # Log the visit so it shows up in browser_history / history tab.
+        # Series-scoped — same URL across multiple meetings recorded once
+        # per visit, ordered by timestamp.
+        try:
+            from agent.tools.browser import _log_browser_visit
+            _log_browser_visit(bot_id, out.get("url") or url, out.get("title") or "", source="page_navigate")
+        except Exception:
+            log.exception("page_navigate: history logging failed bot=%s", bot_id)
     return out
 
 

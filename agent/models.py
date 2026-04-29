@@ -614,6 +614,7 @@ class CanvasState(models.Model):
     TAB_TASKS = "tasks"
     TAB_FOCUS = "focus"
     TAB_BROWSER = "browser"
+    TAB_HISTORY = "history"
     TAB_DEBUG = "debug"
     TAB_CHOICES = [
         (TAB_DASHBOARD, "Dashboard"),
@@ -621,6 +622,7 @@ class CanvasState(models.Model):
         (TAB_TASKS, "Tasks"),
         (TAB_FOCUS, "Focus"),
         (TAB_BROWSER, "Browser"),
+        (TAB_HISTORY, "History"),
         (TAB_DEBUG, "Debug"),
     ]
 
@@ -730,3 +732,105 @@ class MeetingCursor(models.Model):
 
     def __str__(self):
         return f"cursor bot={self.bot_id} turn={self.last_turn_id}"
+
+
+class BrowserPageVisit(models.Model):
+    """
+    Append-only log of every URL the agent navigates the bot's headless
+    Chrome to (via `page_navigate` / `open_url`), keyed to the meeting
+    series so the agent can recall pages across multiple meetings in
+    the same series.
+
+    NOT a substitute for the per-meeting transcript — this tracks the
+    bot's *web-browsing* history, not its conversational history.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    series = models.ForeignKey(
+        "MeetingSeries",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="browser_visits",
+    )
+    bot = models.ForeignKey(
+        "bots.Bot",
+        on_delete=models.CASCADE,
+        to_field="object_id",
+        related_name="browser_visits",
+        db_index=True,
+    )
+    url = models.URLField(max_length=2048)
+    title = models.CharField(max_length=512, blank=True, default="")
+    # 'open_url' = display-only iframe; 'page_navigate' = interactive Chrome.
+    source = models.CharField(max_length=16, default="page_navigate")
+
+    class Meta:
+        db_table = "agent_browser_page_visit"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["series", "-created_at"]),
+            models.Index(fields=["bot", "-created_at"]),
+        ]
+        verbose_name = "Browser Page Visit"
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} {self.url}"
+
+
+class Bookmark(models.Model):
+    """
+    Saved URL the agent (or the user, via the agent) wants to be able
+    to pull up again later. Lives at the series level so the same
+    bookmark surfaces across every meeting in the series.
+
+    series=NULL means "global to this bot's project" — for stuff the
+    user wants accessible from any meeting.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    series = models.ForeignKey(
+        "MeetingSeries",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="bookmarks",
+    )
+    # Track who/what created it for provenance — bot_id of the agent
+    # that saved it. Optional because manually-created bookmarks (e.g.
+    # via admin) won't have one.
+    created_by_bot = models.ForeignKey(
+        "bots.Bot",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        to_field="object_id",
+        related_name="+",
+    )
+
+    url = models.URLField(max_length=2048)
+    label = models.CharField(max_length=255)
+    notes = models.TextField(blank=True, default="")
+    tags = ArrayField(models.CharField(max_length=64), default=list, blank=True)
+
+    class Meta:
+        db_table = "agent_bookmark"
+        ordering = ["-updated_at"]
+        indexes = [
+            models.Index(fields=["series", "-updated_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["series", "url"],
+                name="unique_bookmark_per_series",
+            ),
+        ]
+        verbose_name = "Bookmark"
+
+    def __str__(self):
+        return f"{self.label} → {self.url}"

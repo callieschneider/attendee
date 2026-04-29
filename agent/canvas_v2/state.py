@@ -96,14 +96,22 @@ def navigate(bot_id: str, tab: str, *, source: str = "agent") -> dict:
         state = _get_or_create_state(bot_id)
         if state is None:
             return {"error": "no bot for that id"}
-        if state.user_driving and source == "agent":
-            log.info(
-                "canvas_v2: ignoring agent navigate while user driving bot=%s",
-                bot_id,
-            )
-            return {"ok": True, "ignored": True, "reason": "user_driving"}
+        # Always honor explicit navigate calls. The user_driving flag
+        # is a hint about the user's recent activity, not a lock.
+        # If the user asked the agent to do something, the agent
+        # needs to be able to do it — don't lock the agent out.
         state.active_tab = tab
-        state.save(update_fields=["active_tab", "updated_at"])
+        # An explicit agent navigate overrides the user-driving hint
+        # so subsequent ambient writes (focus / open_url) can also
+        # auto-switch as expected.
+        if source == "agent":
+            state.user_driving = False
+            state.user_driving_since = None
+            state.save(update_fields=[
+                "active_tab", "user_driving", "user_driving_since", "updated_at",
+            ])
+        else:
+            state.save(update_fields=["active_tab", "updated_at"])
     publish_state_event(bot_id, {"event": "navigate", "tab": tab, "source": source})
     return {"ok": True, "tab": tab}
 
@@ -176,8 +184,7 @@ def open_url(bot_id: str, url: str, title: str = "") -> dict:
             return {"error": "no bot for that id"}
         state.browser_url = url[:2048]
         state.browser_title = (title or "")[:255]
-        if not state.user_driving:
-            state.active_tab = "browser"
+        state.active_tab = "browser"
         state.save(update_fields=[
             "browser_url", "browser_title", "active_tab", "updated_at",
         ])
@@ -217,7 +224,7 @@ def update_focus(
     state.focus_session_id = session_id
     state.focus_text = text
     state.focus_done = bool(done)
-    if state.active_tab not in ("focus",) and not state.user_driving:
+    if state.active_tab not in ("focus",):
         state.active_tab = "focus"
     state.save(update_fields=[
         "focus_session_id", "focus_text", "focus_done", "active_tab",
@@ -251,8 +258,9 @@ def snapshot(bot_id: str) -> dict:
     the canvas can render without a flurry of follow-up requests.
     """
     from agent.models import (
-        ActionLogEntry, CanvasState, MeetingCursor, MeetingTask,
-        MeetingOccurrence, TranscriptEvent, Task,
+        ActionLogEntry, Bookmark, BrowserPageVisit, CanvasState,
+        MeetingCursor, MeetingTask, MeetingOccurrence, TranscriptEvent,
+        Task,
     )
 
     state = CanvasState.objects.filter(bot_id=bot_id).first()
@@ -334,6 +342,61 @@ def snapshot(bot_id: str) -> dict:
 
     voice = _voice_state(bot_id, cursor)
 
+    # ── History tab payload: series-wide recall ──────────────────────────
+    if series is not None:
+        visits_qs = (
+            BrowserPageVisit.objects.filter(series=series)
+            .order_by("-created_at")[:40]
+        )
+        bookmarks_qs = (
+            Bookmark.objects.filter(series=series)
+            .order_by("-updated_at")[:40]
+        )
+        recent_occurrences_qs = (
+            MeetingOccurrence.objects.filter(series=series)
+            .exclude(id=occ.id if occ else None)
+            .order_by("-created_at")[:10]
+        )
+    else:
+        visits_qs = (
+            BrowserPageVisit.objects.filter(bot_id=bot_id)
+            .order_by("-created_at")[:40]
+        )
+        bookmarks_qs = Bookmark.objects.filter(series__isnull=True).order_by(
+            "-updated_at"
+        )[:40]
+        recent_occurrences_qs = MeetingOccurrence.objects.none()
+
+    history_visits = [
+        {
+            "url": v.url,
+            "title": v.title,
+            "source": v.source,
+            "visited_at": v.created_at.isoformat() if v.created_at else None,
+        }
+        for v in visits_qs
+    ]
+    history_bookmarks = [
+        {
+            "id": str(b.id),
+            "url": b.url,
+            "label": b.label,
+            "notes": (b.notes or "")[:200],
+            "tags": list(b.tags or []),
+            "updated_at": b.updated_at.isoformat() if b.updated_at else None,
+        }
+        for b in bookmarks_qs
+    ]
+    history_meetings = [
+        {
+            "id": str(o.id),
+            "title": o.title or "(untitled)",
+            "started_at": o.started_at.isoformat() if o.started_at else None,
+            "summary": (o.summary or "")[:280],
+        }
+        for o in recent_occurrences_qs
+    ]
+
     return {
         "bot_id": bot_id,
         "now": timezone.now().isoformat(),
@@ -360,6 +423,11 @@ def snapshot(bot_id: str) -> dict:
         "series": (
             {"id": str(series.id), "title": series.title} if series else None
         ),
+        "history": {
+            "visits": history_visits,
+            "bookmarks": history_bookmarks,
+            "meetings": history_meetings,
+        },
     }
 
 

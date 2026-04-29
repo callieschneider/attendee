@@ -76,7 +76,7 @@ TURN_COOLDOWN_S = float(os.getenv("AGENT_TURN_COOLDOWN_MS", "0")) / 1000.0
 class LiveSessionManager:
     def __init__(self, bot_id: str):
         self.bot_id = bot_id
-        self.gate = AudioGate(bot_id)
+        self.gate = AudioGate(bot_id, on_transition=self._on_gate_transition)
         self._gemini_ws = None
         self._attendee_ws = None
         self._resumption_handle: Optional[str] = None
@@ -701,6 +701,52 @@ class LiveSessionManager:
             except Exception:
                 log.exception("live_session: setup-buffer flush failed bot=%s", self.bot_id)
                 return
+
+    async def _on_gate_transition(self, event: str, reason: str) -> None:
+        """
+        Called by AudioGate on real open/close transitions (not extends,
+        not no-op closes). Plays a short audio cue audible to everyone
+        in the meeting so the room knows whether the bot is listening.
+
+        Wake chime when the gate opens, sleep chime when it closes.
+        Sent through the same Attendee bot-output channel as Gemini's
+        TTS, so it goes out of the bot's mic just like speech.
+        """
+        try:
+            from .chimes import WAKE_CHIME, SLEEP_CHIME, ATTENDEE_SAMPLE_RATE
+        except Exception:
+            log.exception("live_session: chimes import failed bot=%s", self.bot_id)
+            return
+        ws = self._attendee_ws
+        if ws is None:
+            return
+        pcm = WAKE_CHIME if event == "open" else SLEEP_CHIME
+        if not pcm:
+            return
+        try:
+            await ws.send(
+                json.dumps(
+                    {
+                        "trigger": "realtime_audio.bot_output",
+                        "data": {
+                            "chunk": pcm16_to_b64(pcm),
+                            "sample_rate": ATTENDEE_SAMPLE_RATE,
+                        },
+                    }
+                )
+            )
+            # Treat the chime like bot speech so the audio pump doesn't
+            # treat its echo as a "user said something" event.
+            self._bot_speaking_until = max(
+                self._bot_speaking_until,
+                time.monotonic() + 0.4,
+            )
+            log.info(
+                "live_session: chime bot=%s event=%s reason=%s bytes=%d",
+                self.bot_id, event, reason, len(pcm),
+            )
+        except Exception:
+            log.exception("live_session: chime send failed bot=%s", self.bot_id)
 
     async def _attendee_audio_pump(self) -> None:
         """Forward Attendee audio into Gemini Live iff gate is open."""
