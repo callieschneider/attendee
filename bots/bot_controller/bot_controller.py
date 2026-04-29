@@ -1115,6 +1115,52 @@ class BotController:
         except Exception as e:
             logger.warning("canvas_tab: open failed (non-fatal): %s", e)
 
+    def _post_canvas_link_to_chat_safely(self):
+        """
+        Post the canvas URL into the meeting chat shortly after join so
+        humans can open it in their own browser. Runs in a background
+        thread with a delay so the bot's adapter is fully ready before
+        we try to send.
+
+        Best-effort and silent — chat send failure must not break the
+        meeting.
+        """
+        try:
+            from django.conf import settings
+            api_base = getattr(settings, "AGENT_APP_URL", "").rstrip("/")
+            api_key = getattr(settings, "ATTENDEE_API_KEY", "")
+            if not api_base or not api_key:
+                logger.info("canvas_chat: AGENT_APP_URL/ATTENDEE_API_KEY missing; skipping link post")
+                return
+            bot_id = self.bot_in_db.object_id
+            canvas_url = f"{api_base}/agent/canvas/v2/{bot_id}/"
+            agent_name = getattr(settings, "AGENT_NAME", "Clever Star")
+            text = f"{agent_name} canvas: {canvas_url}"
+
+            import threading
+            import requests as _req
+
+            def _send():
+                try:
+                    resp = _req.post(
+                        f"{api_base}/api/v1/bots/{bot_id}/send_chat_message",
+                        json={"message": text, "to": "everyone"},
+                        headers={"Authorization": f"Token {api_key}"},
+                        timeout=10,
+                    )
+                    logger.info(
+                        "canvas_chat: posted link bot=%s status=%s",
+                        bot_id, resp.status_code,
+                    )
+                except Exception as e:
+                    logger.warning("canvas_chat: post failed (non-fatal): %s", e)
+
+            # 6s delay so the bot's chat panel is wired up and Meet has
+            # finished its admit sequence.
+            threading.Timer(6.0, _send).start()
+        except Exception as e:
+            logger.warning("canvas_chat: schedule failed (non-fatal): %s", e)
+
     def _toggle_canvas_screenshare(self, on: bool):
         """
         Phase 4: drive Meet's "Share screen" / "Stop presenting" button.
@@ -2183,6 +2229,9 @@ class BotController:
             # mode screen sharing (the tab has to exist in this Chrome
             # instance for getDisplayMedia / Meet's tab-picker to see it).
             self._open_canvas_tab_for_present_mode_safely()
+            # Drop the canvas link into the meeting chat ~6s after join so
+            # humans can open the canvas in their own browser.
+            self._post_canvas_link_to_chat_safely()
             return
 
         if message.get("message") == BotAdapter.Messages.BOT_RECORDING_PERMISSION_DENIED:
