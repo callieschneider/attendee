@@ -166,50 +166,137 @@ class BrowserSession:
         return {"ok": True, **out}
 
     async def click_text(self, text: str, *, case_sensitive: bool = False) -> dict:
-        from selenium.webdriver.common.by import By
+        """
+        Click an element whose visible text matches `text`.
+
+        We use a JavaScript-side scan instead of XPath because:
+        - XPath equality is too strict (an inner whitespace, a unicode
+          ellipsis vs three dots, a wrapping span, all break it).
+        - JS sees the rendered DOM the way the user does and can do
+          whatever-normalization-we-want.
+
+        Strategy (highest specificity first):
+        1. Element whose normalized text == query (preferred role).
+        2. Element whose normalized text starts-with query.
+        3. Element whose normalized text contains query.
+        4. Same three for any element (not just buttons/links).
+
+        If nothing matches, the error includes a sample of what visible
+        clickable text DID appear on the page, so the agent can pick a
+        better target on the next try without guessing.
+        """
 
         def _click():
             t = text.strip()
             if not t:
                 raise BrowserSessionError("text required")
-            # Prefer accessible name match (button/link). Fall back to any element.
-            xpaths = (
-                f"//*[self::a or self::button or @role='button' or @role='link']"
-                f"[normalize-space(string(.))='{_xp_lit(t)}']",
-                # Case-insensitive contains as a softer fallback
-                f"//*[self::a or self::button or @role='button' or @role='link']"
-                f"[contains(translate(normalize-space(string(.)),"
-                f" 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),"
-                f" '{_xp_lit(t.lower())}')]",
-                # Last resort: any element with that visible text
-                f"//*[normalize-space(string(.))='{_xp_lit(t)}']",
-                f"//*[contains(translate(normalize-space(string(.)),"
-                f" 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'),"
-                f" '{_xp_lit(t.lower())}')]",
-            )
-            if case_sensitive:
-                xpaths = (xpaths[0], xpaths[2])
-            for xp in xpaths:
-                try:
-                    elements = self._driver.find_elements(By.XPATH, xp)
-                except Exception:
-                    elements = []
-                for el in elements:
-                    try:
-                        if not el.is_displayed():
-                            continue
-                        self._driver.execute_script(
-                            "arguments[0].scrollIntoView({block:'center', inline:'center'});", el,
-                        )
-                        el.click()
-                        return {
-                            "matched": "text",
-                            "element_text": (el.text or "")[:200],
-                            "url": self._driver.current_url,
-                        }
-                    except Exception:
-                        continue
-            raise BrowserSessionError(f"no clickable element with text {text!r}")
+
+            js = r"""
+                const query = arguments[0];
+                const caseSensitive = arguments[1];
+
+                function norm(s) {
+                    if (s == null) return "";
+                    s = String(s);
+                    // Collapse whitespace.
+                    s = s.replace(/\s+/g, " ").trim();
+                    // Treat unicode ellipsis as three dots so 'More
+                    // information...' matches 'More information…'.
+                    s = s.replace(/\u2026/g, "...");
+                    // Strip trailing punctuation noise that's often in
+                    // the DOM but not how a human would phrase it.
+                    s = s.replace(/[\s.\u2026:!?,]+$/g, "");
+                    if (!caseSensitive) s = s.toLowerCase();
+                    return s;
+                }
+
+                const q = norm(query);
+                const isClickRole = (el) => {
+                    const tn = (el.tagName || "").toLowerCase();
+                    if (tn === "a" || tn === "button") return true;
+                    const role = el.getAttribute && el.getAttribute("role");
+                    if (role === "button" || role === "link" || role === "menuitem") return true;
+                    if (el.onclick) return true;
+                    return false;
+                };
+
+                const visible = (el) => {
+                    if (!el.getClientRects().length) return false;
+                    const cs = window.getComputedStyle(el);
+                    if (cs.visibility === "hidden" || cs.display === "none") return false;
+                    if (parseFloat(cs.opacity || "1") < 0.05) return false;
+                    return true;
+                };
+
+                const all = Array.from(document.querySelectorAll("*"));
+                const targets = all.filter(visible);
+
+                function pick(filterFn) {
+                    // Prefer click-role elements; fall back to any element.
+                    const click = targets.filter(isClickRole).filter(filterFn);
+                    if (click.length) return click[0];
+                    const any = targets.filter(filterFn);
+                    if (any.length) return any[0];
+                    return null;
+                }
+
+                let el =
+                    pick((e) => norm(e.innerText) === q) ||
+                    pick((e) => norm(e.textContent) === q) ||
+                    pick((e) => norm(e.innerText).startsWith(q)) ||
+                    pick((e) => norm(e.textContent).startsWith(q)) ||
+                    pick((e) => norm(e.innerText).includes(q)) ||
+                    pick((e) => norm(e.textContent).includes(q));
+
+                if (!el) {
+                    // Build a small inventory of what IS clickable so the
+                    // caller can suggest something better.
+                    const sample = targets
+                        .filter(isClickRole)
+                        .slice(0, 30)
+                        .map(e => (e.innerText || e.textContent || "").replace(/\s+/g, " ").trim().slice(0, 60))
+                        .filter(s => s.length > 0);
+                    return { ok: false, sample: sample };
+                }
+
+                // If our match isn't itself a click-role element, walk up
+                // until we find one (so we click the link, not a span
+                // inside it).
+                let target = el;
+                while (target && target !== document.body && !isClickRole(target)) {
+                    target = target.parentElement;
+                }
+                if (!target || target === document.body) target = el;
+
+                target.scrollIntoView({block: "center", inline: "center"});
+                try {
+                    target.click();
+                    return {
+                        ok: true,
+                        element_text: (target.innerText || target.textContent || "").trim().slice(0, 200),
+                        tag: target.tagName.toLowerCase(),
+                        href: target.getAttribute && target.getAttribute("href") || null,
+                    };
+                } catch (e) {
+                    return { ok: false, error: String(e), sample: [] };
+                }
+            """
+            result = self._driver.execute_script(js, t, bool(case_sensitive))
+            if not isinstance(result, dict) or not result.get("ok"):
+                sample = (result or {}).get("sample") or []
+                if sample:
+                    raise BrowserSessionError(
+                        f"no clickable element matching {text!r}. Visible click targets: "
+                        + ", ".join(repr(s) for s in sample[:10])
+                    )
+                raise BrowserSessionError(f"no clickable element matching {text!r}")
+            return {
+                "matched": "text",
+                "element_text": result.get("element_text", "")[:200],
+                "tag": result.get("tag"),
+                "href": result.get("href"),
+                "url": self._driver.current_url,
+            }
 
         out = await self._run(_click)
         return {"ok": True, **out}
