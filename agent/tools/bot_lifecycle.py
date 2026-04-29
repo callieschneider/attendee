@@ -42,6 +42,11 @@ def _leave_meeting(inp: dict, ctx: dict) -> dict:
     if isinstance(creds, dict):
         return creds
     api_key, app_url = creds
+
+    # Mark this exit as intentional in Redis so the auto-respawn
+    # supervisor doesn't re-spawn us when the bot ends.
+    _set_intentional_leave(bot_id)
+
     try:
         resp = req.post(
             f"{app_url}/api/v1/bots/{bot_id}/leave",
@@ -54,6 +59,47 @@ def _leave_meeting(inp: dict, ctx: dict) -> dict:
     if resp.status_code >= 400:
         return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
     return {"ok": True, "bot_id": bot_id}
+
+
+# ── Intentional-leave marker (used by auto-respawn supervisor) ─────────────
+
+
+def _intent_redis():
+    import os
+    try:
+        import redis
+    except Exception:
+        return None
+    url = (
+        os.getenv("REDIS_URL")
+        or os.getenv("CELERY_BROKER_URL")
+        or "redis://localhost:6379/0"
+    )
+    try:
+        return redis.from_url(url, decode_responses=True)
+    except Exception:
+        return None
+
+
+def _set_intentional_leave(bot_id: str, ttl_seconds: int = 300) -> None:
+    """leave_meeting and respawn_bot mark themselves so we don't auto-respawn."""
+    r = _intent_redis()
+    if r is None:
+        return
+    try:
+        r.set(f"agent:bot:intentional_leave:{bot_id}", "1", ex=ttl_seconds)
+    except Exception:
+        pass
+
+
+def is_intentional_leave(bot_id: str) -> bool:
+    r = _intent_redis()
+    if r is None:
+        return False
+    try:
+        return bool(r.get(f"agent:bot:intentional_leave:{bot_id}"))
+    except Exception:
+        return False
 
 
 def _respawn_bot(inp: dict, ctx: dict) -> dict:
@@ -135,7 +181,9 @@ def _respawn_bot(inp: dict, ctx: dict) -> dict:
         # than to abort and end up with two bots in the meeting.
 
     # Tell the old bot to leave AFTER the new spawn is in flight, so
-    # there's continuity. Best-effort.
+    # there's continuity. Best-effort. Mark as intentional so the
+    # auto-respawn supervisor doesn't fire ANOTHER respawn for us.
+    _set_intentional_leave(old_bot_id)
     try:
         req.post(
             f"{app_url}/api/v1/bots/{old_bot_id}/leave",

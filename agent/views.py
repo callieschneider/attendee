@@ -191,6 +191,23 @@ def attendee_webhook(request):
         if new_state == "ended" and bot_id:
             from .tasks import process_finished_meeting
             process_finished_meeting.delay(bot_id=bot_id)
+
+            # Auto-respawn supervisor: bring the bot back if it died
+            # unexpectedly (not via leave_meeting / respawn_bot).
+            # Capped at 2 auto-respawns per meeting per 10 minutes.
+            try:
+                from .bot_supervisor import maybe_auto_respawn
+                supervisor_result = maybe_auto_respawn(bot_id)
+                log.info(
+                    "attendee_webhook: auto_respawn bot=%s result=%s",
+                    bot_id, supervisor_result,
+                )
+            except Exception:
+                log.exception(
+                    "attendee_webhook: auto_respawn raised bot=%s",
+                    bot_id,
+                )
+
             return JsonResponse({"ok": True, "dispatched": "process_finished_meeting"})
         return JsonResponse({"ok": True, "ignored": f"state={new_state}"})
 
