@@ -1150,26 +1150,101 @@ class BotController:
 
             driver.switch_to.window(meet_handle)
 
-            if on:
-                js = """
-                    const labels = ["Present now", "Share screen", "Share now", "Présenter maintenant"];
+            # Robust button-finder with four fallback strategies. Meet's
+            # button labels and DOM shape change over time and across
+            # locales; we try aria-label, data-tooltip, XPath text match,
+            # and finally innerText scan. The function returns whichever
+            # strategy succeeded so we log the path that worked.
+            js = r"""
+                const ON = arguments[0];
+                const labels = ON
+                    ? ["Present now", "Share screen", "Share now",
+                       "Présent now", "Présenter maintenant"]
+                    : ["Stop presenting", "Stop sharing",
+                       "Stop sharing screen", "Stop screen share",
+                       "You're presenting"];
+
+                function tryClick(strategyName, btn, label) {
+                    if (!btn) return null;
+                    try { btn.click(); return strategyName + ":" + label; }
+                    catch (e) { return null; }
+                }
+
+                // 1. aria-label substring (case-insensitive)
+                for (const l of labels) {
+                    const btn = document.querySelector(
+                        `button[aria-label*="${l}" i]`);
+                    const r = tryClick("aria", btn, l);
+                    if (r) return r;
+                }
+
+                // 2. data-tooltip substring
+                for (const l of labels) {
+                    const btn = document.querySelector(
+                        `button[data-tooltip*="${l}" i]`);
+                    const r = tryClick("tooltip", btn, l);
+                    if (r) return r;
+                }
+
+                // 3. visible text via XPath (case-insensitive contains)
+                const lower = "abcdefghijklmnopqrstuvwxyz";
+                const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+                for (const l of labels) {
+                    const xp = `//button[contains(translate(string(.), '${upper}', '${lower}'), '${l.toLowerCase()}')]`;
+                    const node = document.evaluate(
+                        xp, document, null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                    ).singleNodeValue;
+                    const r = tryClick("xpath", node, l);
+                    if (r) return r;
+                }
+
+                // 4. innerText scan over all buttons (slow last resort)
+                const all = Array.from(document.querySelectorAll('button'));
+                for (const btn of all) {
+                    const t = (btn.innerText || btn.textContent || "")
+                        .trim().toLowerCase();
                     for (const l of labels) {
-                        const btn = document.querySelector(`button[aria-label*="${l}" i]`);
-                        if (btn) { btn.click(); return l; }
+                        if (t.includes(l.toLowerCase())) {
+                            const r = tryClick("text", btn, l);
+                            if (r) return r;
+                        }
                     }
-                    return null;
-                """
-            else:
-                js = """
-                    const labels = ["Stop presenting", "Stop sharing", "Stop sharing screen"];
-                    for (const l of labels) {
-                        const btn = document.querySelector(`button[aria-label*="${l}" i]`);
-                        if (btn) { btn.click(); return l; }
-                    }
-                    return null;
-                """
-            result = driver.execute_script(js)
+                }
+                return null;
+            """
+            result = driver.execute_script(js, on)
             logger.info("canvas_share: toggled on=%s result=%s", on, result)
+
+            # When starting, the Present-now button often opens a sub-menu
+            # ('A tab', 'A window', 'Your entire screen') instead of
+            # immediately invoking getDisplayMedia. Click 'A tab' if it
+            # appears so the auto-select-desktop-capture-source flag can
+            # lock onto our canvas tab.
+            if on and result is not None:
+                import time as _time
+                _time.sleep(0.4)
+                tab_choice_js = r"""
+                    const labels = ["A tab", "Chrome tab", "A Chrome tab",
+                                    "Browser tab"];
+                    const all = Array.from(document.querySelectorAll(
+                        'button, [role="menuitem"], li'));
+                    for (const el of all) {
+                        const t = (el.innerText || el.textContent || "")
+                            .trim().toLowerCase();
+                        for (const l of labels) {
+                            if (t === l.toLowerCase() ||
+                                t.startsWith(l.toLowerCase() + "\n") ||
+                                t.startsWith(l.toLowerCase() + " ")) {
+                                el.click();
+                                return l;
+                            }
+                        }
+                    }
+                    return null;
+                """
+                tab_result = driver.execute_script(tab_choice_js)
+                logger.info("canvas_share: tab-choice click result=%s", tab_result)
         except Exception as e:
             logger.warning("canvas_share: toggle failed (non-fatal): %s", e)
 
