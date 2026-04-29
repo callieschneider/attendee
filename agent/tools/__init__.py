@@ -8,7 +8,7 @@ import logging
 from .types import ToolDefinition
 from . import (
     meetings, series, tasks, artifacts, search, utility, voice, chat,
-    visual, models, think_deep, canvas_nav, screen_share, browser,
+    visual, models, think_deep, canvas_nav, screen_share, browser, page,
 )
 
 log = logging.getLogger("agent.tools")
@@ -17,7 +17,7 @@ TOOL_REGISTRY: dict[str, ToolDefinition] = {}
 
 for _mod in (
     meetings, series, tasks, artifacts, search, utility, voice, chat,
-    visual, models, think_deep, canvas_nav, screen_share, browser,
+    visual, models, think_deep, canvas_nav, screen_share, browser, page,
 ):
     for _tool in getattr(_mod, "TOOLS", []):
         if _tool.name in TOOL_REGISTRY:

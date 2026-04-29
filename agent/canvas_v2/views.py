@@ -85,8 +85,9 @@ def _sse_stream(bot_id: str) -> Iterator[bytes]:
     pubsub = r.pubsub(ignore_subscribe_messages=True)
     state_channel = f"canvas:state:{bot_id}"
     stream_pattern = f"canvas:stream:{bot_id}:*"
+    browser_channel = f"canvas:browser:{bot_id}"
     try:
-        pubsub.subscribe(state_channel)
+        pubsub.subscribe(state_channel, browser_channel)
         pubsub.psubscribe(stream_pattern)
     except Exception:
         log.exception("canvas_v2: pubsub subscribe failed bot=%s", bot_id)
@@ -116,6 +117,11 @@ def _sse_stream(bot_id: str) -> Iterator[bytes]:
                     tab = ""
                 payload = {"channel": "stream", "tab": tab, "data": _safe_json(data)}
                 yield f"event: stream\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+            elif channel == browser_channel:
+                # Phase 2 browser screencast: forward as a dedicated event
+                # so the Browser tab can render the latest PNG.
+                payload = _safe_json(data)
+                yield f"event: browser\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
             else:
                 payload = {"channel": "state", "data": _safe_json(data)}
                 yield f"event: state\ndata: {json.dumps(payload)}\n\n".encode("utf-8")

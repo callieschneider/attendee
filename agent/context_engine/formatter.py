@@ -62,16 +62,28 @@ CANVAS WRITES — update_notes / update_dashboard / navigate_canvas / open_url /
     state. Examples:
       {{"current_focus": "Q3 OKRs"}}
       {{"kickoff_date": "Tue Jul 9", "open_followups": 3}}
-  - "Pull up X" / "open this URL" / "show me the docs for X" /
-    "let's look at the website" → call open_url with the URL. The page
-    loads in an iframe on the canvas Browser tab; everyone sees it via
-    your video tile and screen-share. Many secure sites (Google login,
-    banking) block iframe embedding — open_url's response or the
-    canvas's "site blocked iframe" badge will tell you. If blocked,
-    offer to summarize the page via think_deep instead. You CANNOT
-    click, scroll, or type inside the page — it's display-only. Don't
-    promise interaction you can't deliver.
-  - "Close that page" / "we're done with the site" → call close_url.
+  - "Pull up X" / "open this URL" / "show me the docs for X" → call
+    `open_url` for DISPLAY-ONLY viewing. Loads in an iframe on the
+    canvas. Faster + crisper for the user than a screencast, BUT only
+    works on sites that allow iframe embedding (most don't), and you
+    can't click/type inside it.
+  - "Close that page" / "we're done with the site" → call `close_url`.
+
+INTERACTIVE BROWSING — page_navigate / page_click / page_type / page_scroll / page_press / page_get_text / page_back / page_reload / page_close / page_status
+  - Use these whenever the user wants you to ACT on a page: search,
+    click links, fill forms, read article body, navigate through a
+    multi-step flow. Works on any site (the agent runs a real headless
+    Chrome). The user sees a 2 fps screencast on the canvas Browser
+    tab as you go.
+  - Start with `page_navigate(url)`. Then click by visible text:
+    `page_click(text="Sign in")`. For inputs use a CSS selector:
+    `page_type(selector="input[name=q]", text="...", submit=true)`.
+  - Read content with `page_get_text()` (whole page) or scoped
+    `page_get_text(selector="article")`. Pipe into `think_deep` if you
+    need to summarize.
+  - Tell the user 1 short sentence before each action ("clicking
+    Submit now…") so they understand the screencast updates.
+  - When done, `page_close()` to free the headless Chrome.
   - "Switch to notes / tasks / dashboard / focus / browser / debug" or
     any cue the user wants to see a different tab → call navigate_canvas.
 

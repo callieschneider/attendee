@@ -120,6 +120,16 @@ async def main() -> None:
     loop.add_signal_handler(signal.SIGTERM, stop.set_result, None)
     loop.add_signal_handler(signal.SIGINT, stop.set_result, None)
 
+    # Phase 2 browser tools call into the BrowserSession (async) from
+    # tool handlers that the dispatcher invokes via sync_to_async. Stash
+    # the bridge loop so those handlers can re-enter it via
+    # asyncio.run_coroutine_threadsafe.
+    try:
+        from agent import browser_session as _bs
+        _bs.set_bridge_loop(loop)
+    except Exception:
+        log.exception("bridge: failed to register bridge loop with browser_session")
+
     async with websockets.serve(handler, "0.0.0.0", BRIDGE_PORT):
         log.info("bridge: ready on 0.0.0.0:%d", BRIDGE_PORT)
         await stop

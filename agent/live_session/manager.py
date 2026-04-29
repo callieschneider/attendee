@@ -223,6 +223,12 @@ class LiveSessionManager:
                 await self._gemini_ws.close()
         except Exception:
             pass
+        # Phase 2 browser automation: kill any per-bot headless Chrome.
+        try:
+            from agent import browser_session as _bs
+            await _bs.close_for_bot(self.bot_id)
+        except Exception:
+            log.exception("live_session: browser_session close failed bot=%s", self.bot_id)
         self._stop_event.set()
         log.info("live_session: shut down bot=%s", self.bot_id)
 
