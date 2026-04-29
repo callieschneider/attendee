@@ -1115,14 +1115,32 @@ class BotController:
                 "(function(){"
                 "if (window.__cleverstar_share_overridden) return;"
                 "window.__cleverstar_share_overridden = true;"
+                "window.__cleverstar_override_log = [];"
+                "function L(s){"
+                "  try { window.__cleverstar_override_log.push("
+                "    new Date().toISOString().slice(11,23) + ' ' + s); } catch(e){}"
+                "  try { console.log('[cleverstar]', s); } catch(e){}"
+                "}"
                 "const FRAME_URL = " + repr(frame_url) + ";"
-                "const W = 1920, H = 1080, FPS = 12;"
+                "const W = 1280, H = 720, FPS = 15;"
                 ""
-                "function createStream() {"
+                "async function createStream(opts) {"
+                "  L('createStream called with opts=' + JSON.stringify(opts));"
                 "  const canvas = document.createElement('canvas');"
                 "  canvas.width = W; canvas.height = H;"
                 "  const ctx = canvas.getContext('2d');"
-                "  ctx.fillStyle = '#0a0a0c'; ctx.fillRect(0, 0, W, H);"
+                # Pre-paint with a non-trivial pattern so Meet's stream
+                # verification has actual frame data immediately.
+                "  ctx.fillStyle = '#0c0c10'; ctx.fillRect(0, 0, W, H);"
+                "  ctx.fillStyle = '#5e6ad2';"
+                "  ctx.font = '600 56px Inter, sans-serif';"
+                "  ctx.textAlign = 'center';"
+                "  ctx.textBaseline = 'middle';"
+                "  ctx.fillText('Clever Star Canvas', W/2, H/2 - 24);"
+                "  ctx.fillStyle = '#9ca3af';"
+                "  ctx.font = '400 24px Inter, sans-serif';"
+                "  ctx.fillText('connecting...', W/2, H/2 + 36);"
+                ""
                 "  const img = new Image();"
                 "  img.crossOrigin = 'anonymous';"
                 "  let stopped = false;"
@@ -1131,29 +1149,70 @@ class BotController:
                 "    if (stopped) return;"
                 "    if (!inFlight) {"
                 "      inFlight = true;"
-                "      img.onload = function() { inFlight = false;"
-                "        try { ctx.drawImage(img, 0, 0, W, H); } catch(e) {}"
+                "      const i = new Image();"
+                "      i.crossOrigin = 'anonymous';"
+                "      i.onload = function() { inFlight = false;"
+                "        try { ctx.drawImage(i, 0, 0, W, H); } catch(e) {}"
                 "      };"
-                "      img.onerror = function() { inFlight = false; };"
-                "      img.src = FRAME_URL + '?t=' + Date.now();"
+                "      i.onerror = function() { inFlight = false; };"
+                "      i.src = FRAME_URL + '?t=' + Date.now();"
                 "    }"
                 "    setTimeout(tick, Math.floor(1000 / FPS));"
                 "  }"
                 "  tick();"
+                ""
                 "  const stream = canvas.captureStream(FPS);"
-                "  stream.addEventListener('inactive', function() { stopped = true; });"
-                "  stream.getVideoTracks().forEach(function(t) {"
-                "    t.addEventListener('ended', function() { stopped = true; });"
+                ""
+                # If Meet asked for audio with the share, attach a
+                # silent audio track so the returned stream has
+                # matching shape. Meet sometimes rejects a video-only
+                # stream when it expected one with audio.
+                "  try {"
+                "    const wantAudio = !!(opts && opts.audio);"
+                "    if (wantAudio) {"
+                "      const ac = new (window.AudioContext || window.webkitAudioContext)();"
+                "      const dst = ac.createMediaStreamDestination();"
+                "      const osc = ac.createOscillator();"
+                "      const g = ac.createGain(); g.gain.value = 0;"
+                "      osc.connect(g); g.connect(dst); osc.start();"
+                "      dst.stream.getAudioTracks().forEach(t => stream.addTrack(t));"
+                "      L('attached silent audio track');"
+                "    }"
+                "  } catch(e) { L('audio track attach failed: ' + e); }"
+                ""
+                "  stream.addEventListener('inactive', function() {"
+                "    L('stream inactive'); stopped = true;"
                 "  });"
+                "  stream.getVideoTracks().forEach(function(t) {"
+                "    L('vtrack ' + t.id + ' kind=' + t.kind + ' label=' + t.label);"
+                "    t.addEventListener('ended', function() {"
+                "      L('vtrack ' + t.id + ' ended'); stopped = true;"
+                "    });"
+                "  });"
+                ""
+                # Wait briefly for the first real frame draw so the
+                # stream has more than just the splash screen by the
+                # time Meet samples it.
+                "  await new Promise(function(r){ setTimeout(r, 250); });"
+                "  L('returning stream tracks=' + stream.getTracks().length);"
                 "  return stream;"
                 "}"
                 ""
                 "const md = navigator.mediaDevices;"
-                "if (md && md.getDisplayMedia) {"
+                "if (md) {"
+                "  const origGdm = md.getDisplayMedia"
+                "    ? md.getDisplayMedia.bind(md)"
+                "    : null;"
                 "  md.getDisplayMedia = async function(opts) {"
-                "    console.log('[cleverstar] getDisplayMedia overridden, returning canvas stream');"
-                "    return createStream();"
+                "    L('getDisplayMedia called');"
+                "    try { return await createStream(opts); }"
+                "    catch (e) {"
+                "      L('createStream error: ' + e);"
+                "      if (origGdm) return origGdm(opts);"
+                "      throw e;"
+                "    }"
                 "  };"
+                "  L('override installed');"
                 "}"
                 "})();"
             )
@@ -1606,6 +1665,16 @@ class BotController:
                 # the visible dialog text so we know what Meet is
                 # actually telling us.
                 if isinstance(tab_result, dict) and not tab_result.get("clicked"):
+                    # Always log the override's internal call log so we can
+                    # see whether Meet ever invoked getDisplayMedia and what
+                    # happened inside.
+                    try:
+                        ovl = driver.execute_script(
+                            "return window.__cleverstar_override_log || null;"
+                        )
+                        logger.info("canvas_share: override log = %s", ovl)
+                    except Exception:
+                        pass
                     cands = tab_result.get("candidates", []) or []
                     if cands and all(
                         (c.get("text") or "").strip().lower() in ("ok", "okay", "got it", "dismiss")
