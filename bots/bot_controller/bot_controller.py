@@ -1180,6 +1180,34 @@ class BotController:
                 logger.info("canvas_share: adapter has no driver; skipping")
                 return
 
+            # ── DIAGNOSTIC: list every tab's title + url BEFORE clicking ──
+            # Canvas screenshare keeps coming up blank in production. We
+            # need hard evidence of what tabs Chrome thinks exist + which
+            # one auto-select-desktop-capture-source could match.
+            try:
+                pre_tabs = []
+                cur = driver.current_window_handle
+                for h in driver.window_handles:
+                    try:
+                        driver.switch_to.window(h)
+                        pre_tabs.append({
+                            "handle": h,
+                            "url": driver.current_url,
+                            "title": driver.title,
+                        })
+                    except Exception as e:
+                        pre_tabs.append({"handle": h, "error": str(e)})
+                try:
+                    driver.switch_to.window(cur)
+                except Exception:
+                    pass
+                logger.info(
+                    "canvas_share: pre-click tabs (on=%s) bot=%s tabs=%s",
+                    on, self.bot_in_db.object_id, pre_tabs,
+                )
+            except Exception as e:
+                logger.warning("canvas_share: pre-tab inventory failed: %s", e)
+
             # Locate the Meet tab by URL prefix.
             meet_handle = None
             for handle in driver.window_handles:
@@ -1291,6 +1319,68 @@ class BotController:
                 """
                 tab_result = driver.execute_script(tab_choice_js)
                 logger.info("canvas_share: tab-choice click result=%s", tab_result)
+
+                # ── DIAGNOSTIC: 3s after the click, ask Meet's DOM what's
+                # actually being presented and dump every visible tab the
+                # capture picker could have picked from. We log this even
+                # when the click 'succeeded' because the user keeps seeing
+                # only the bot's name preview, which means the click took
+                # effect but the WRONG capture target was selected.
+                _time.sleep(3.0)
+                try:
+                    diag_js = r"""
+                        const out = {};
+                        // 1. What's Meet's UI saying about presenting?
+                        const presenting = document.querySelector(
+                            '[aria-label*="presenting" i],'
+                            + '[aria-label*="you\\'re sharing" i]'
+                        );
+                        out.presenting_indicator = presenting
+                            ? presenting.getAttribute('aria-label')
+                            : null;
+                        out.body_has_share_text = (document.body.innerText || '').includes('You are presenting')
+                            || (document.body.innerText || '').includes("You're presenting");
+                        // 2. Any active getDisplayMedia tracks visible?
+                        const vids = Array.from(document.querySelectorAll('video'));
+                        out.video_elems = vids.length;
+                        out.video_with_src = vids.filter(v => v.srcObject || v.src).length;
+                        // 3. URL + title of THIS tab so we know we're on
+                        //    the right one.
+                        out.this_url = location.href;
+                        out.this_title = document.title;
+                        return out;
+                    """
+                    diag = driver.execute_script(diag_js)
+                    logger.info("canvas_share: post-click diag bot=%s diag=%s",
+                                self.bot_in_db.object_id, diag)
+                except Exception as e:
+                    logger.warning("canvas_share: post-click diag failed: %s", e)
+
+                # Also re-list tabs so we see if a new one (the chooser)
+                # appeared/disappeared.
+                try:
+                    post_tabs = []
+                    cur2 = driver.current_window_handle
+                    for h in driver.window_handles:
+                        try:
+                            driver.switch_to.window(h)
+                            post_tabs.append({
+                                "handle": h,
+                                "url": driver.current_url,
+                                "title": driver.title,
+                            })
+                        except Exception as e:
+                            post_tabs.append({"handle": h, "error": str(e)})
+                    try:
+                        driver.switch_to.window(cur2)
+                    except Exception:
+                        pass
+                    logger.info(
+                        "canvas_share: post-click tabs bot=%s tabs=%s",
+                        self.bot_in_db.object_id, post_tabs,
+                    )
+                except Exception as e:
+                    logger.warning("canvas_share: post-tab inventory failed: %s", e)
         except Exception as e:
             logger.warning("canvas_share: toggle failed (non-fatal): %s", e)
 
