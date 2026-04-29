@@ -2704,16 +2704,12 @@ class BotController:
                 event_type=BotEventTypes.BOT_RECORDING_PERMISSION_GRANTED,
             )
 
-            # Canvas screen-share: override navigator.mediaDevices.getDisplayMedia
-            # in the bot's Meet tab so that when Meet asks for a screen
-            # capture, we return a real MediaStream backed by the agent's
-            # canvas frames (--use-fake-device-for-media-stream would
-            # otherwise return a useless synthetic pattern).
-            self._inject_screenshare_override_safely()
-            # Phase 3/4 left this in place but the override above
-            # supersedes the need for the Chrome tab itself to be the
-            # share source. Keeping the canvas tab open is harmless and
-            # provides a fallback if we ever revert the override.
+            # Canvas tab open: required for screen-share. Chrome's
+            # --auto-select-desktop-capture-source flag matches the
+            # canvas tab by its title and feeds it as the getDisplayMedia
+            # source. The JS-override approach we tried (commit 495ceeeb)
+            # broke Meet entirely with "Something went wrong" so we
+            # reverted to relying on the auto-select flag.
             self._open_canvas_tab_for_present_mode_safely()
             # Drop the canvas link into the meeting chat ~6s after join so
             # humans can open the canvas in their own browser.

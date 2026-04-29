@@ -590,13 +590,17 @@ class WebBotAdapter(BotAdapter):
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
 
         # Canvas-rebuild Phase 4 (Present mode): when Meet asks Chrome for a
-        # NOTE: --auto-select-desktop-capture-source was previously set
-        # here but was useless: --use-fake-device-for-media-stream above
-        # overrides getDisplayMedia to a synthetic pattern, so the
-        # auto-select pick never produced a real source. The actual
-        # screen-share now comes from a JS override of getDisplayMedia
-        # injected by bot_controller._inject_screenshare_override_safely
-        # which returns a canvas-captured stream of our own canvas frames.
+        # Auto-select-desktop-capture-source: when getDisplayMedia is
+        # called on this Chrome, immediately pick the source whose name
+        # contains the given substring. With --use-fake-ui-for-media-stream
+        # the picker dialog is suppressed, so this flag is what actually
+        # determines what the share captures. The substring matches the
+        # canvas tab title set in agent/templates/agent/canvas_v2.html.
+        # Earlier today this combination produced canvas content in the
+        # share thumbnail; the JS-override approach we tried in 495ceeeb
+        # broke things further (Meet rejected the synthetic stream with
+        # 'Something went wrong'), so reverted to this working pattern.
+        options.add_argument('--auto-select-desktop-capture-source=Clever Star Canvas')
 
         if os.getenv("ENABLE_CHROME_SANDBOX", "false").lower() != "true":
             options.add_argument("--no-sandbox")

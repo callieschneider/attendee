@@ -112,7 +112,7 @@
     display: flex;
     flex-direction: column;
   }
-  body.is-bot .canvas-frame { --frame-padding: 48px; border-radius: 26px; }
+  body.is-bot .canvas-frame { --frame-padding: 22px; border-radius: 18px; }
 
   /* ── Markdown body ───────────────────────────────────────────────── */
   .prose-clever {
@@ -591,10 +591,25 @@ function App() {
     async function bootstrap() {
       try {
         const r = await fetch(`/agent/canvas/v2/${BOT_ID}/state.json`, { cache: "no-store" });
-        if (!cancelled && r.ok) setSnap(await r.json());
+        if (!cancelled && r.ok) {
+          const j = await r.json();
+          // Merge instead of replace so SSE-driven fields (like a fresh
+          // browser screencast frame) don't get clobbered by a stale poll.
+          setSnap(prev => prev ? {
+            ...j,
+            browser: { ...(j.browser || {}), ...(prev.browser || {}) },
+          } : j);
+        }
       } catch (e) { console.error("snapshot fetch", e); }
     }
     bootstrap();
+    // Periodic re-fetch keeps transcript + action_log fresh on the
+    // bot's video-tile chromedriver. Those lists only arrive in the
+    // initial SSE snapshot; subsequent state events don't append to
+    // them, so without polling they stay frozen at whatever was in
+    // place when the canvas pump first connected.
+    const refetchEvery = IS_BOT ? 4000 : 8000;
+    const refetchTimer = setInterval(bootstrap, refetchEvery);
 
     const es = new EventSource(`/agent/canvas/v2/${BOT_ID}/stream`);
     es.onopen  = () => setConnected(true);
@@ -693,7 +708,11 @@ function App() {
       }
     });
 
-    return () => { cancelled = true; es.close(); };
+    return () => {
+      cancelled = true;
+      try { clearInterval(refetchTimer); } catch {}
+      try { es.close(); } catch {}
+    };
   }, []);
 
   // Apply theme to the document so CSS variables flip.
