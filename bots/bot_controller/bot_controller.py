@@ -1477,12 +1477,16 @@ class BotController:
             # `xpathLit` builds a concat() expression that handles it.
             js = r"""
                 const ON = arguments[0];
+                // Only true ACTION labels here. NEVER include status-
+                // indicator text like "You're presenting" — that pill
+                // exists in the DOM as a label (not a button) and our
+                // aria-label substring search would 'click' it,
+                // returning success without actually stopping anything.
                 const labels = ON
                     ? ["Present now", "Share screen", "Share now",
                        "Présenter maintenant"]
                     : ["Stop presenting", "Stop sharing",
-                       "Stop sharing screen", "Stop screen share",
-                       "Youre presenting", "you are presenting"];
+                       "Stop sharing screen", "Stop screen share"];
 
                 function tryClick(strategyName, btn, label) {
                     if (!btn) return null;

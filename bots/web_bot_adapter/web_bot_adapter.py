@@ -588,6 +588,16 @@ class WebBotAdapter(BotAdapter):
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        # Background tab throttling kills canvas-tab frame production
+        # while it sits behind the Meet tab. Without this, when Meet
+        # captures the canvas tab via getDisplayMedia, the captured
+        # stream gets stale/frozen frames — the screenshare looks blank
+        # to other participants. These three flags keep the canvas
+        # tab's compositor and timers running at full speed even when
+        # it's not the focused tab.
+        options.add_argument("--disable-background-timer-throttling")
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        options.add_argument("--disable-renderer-backgrounding")
 
         # Canvas-rebuild Phase 4 (Present mode): when Meet asks Chrome for a
         # Auto-select-desktop-capture-source: when getDisplayMedia is
