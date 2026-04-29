@@ -47,6 +47,55 @@ def canvas_shell(request: HttpRequest, bot_id: str) -> HttpResponse:
     return render(request, "agent/canvas_v2.html", {"bot_id": bot_id})
 
 
+def canvas_by_meeting(request: HttpRequest, meet_code: str):
+    """
+    Stable per-meeting URL — redirect to whichever bot is currently
+    active for that meeting code. Users keep this URL bookmarked /
+    open; respawns don't break it.
+
+    `meet_code` is the path component after meet.google.com/, e.g.
+    'krf-poen-qne'.
+    """
+    from django.shortcuts import redirect
+    from bots.models import Bot
+
+    code = (meet_code or "").strip().lower()
+    if not code:
+        return HttpResponseNotFound("missing meet code")
+
+    bot_id = _resolve_active_bot_for_meet_code(code)
+    if not bot_id:
+        return HttpResponseNotFound(
+            f"no active bot for meet code {code!r}"
+        )
+    return redirect(f"/agent/canvas/v2/{bot_id}/", permanent=False)
+
+
+def _resolve_active_bot_for_meet_code(meet_code: str) -> str | None:
+    """Find the most recently-active bot whose meeting_url contains the code."""
+    from bots.models import Bot
+
+    # Active states: anything before LEFT/ENDED. We sort by updated_at
+    # so a freshly-respawned bot wins over a stale one.
+    bots = (
+        Bot.objects.filter(
+            meeting_url__contains=meet_code,
+        )
+        .order_by("-updated_at")
+        .values_list("object_id", "state")[:5]
+    )
+    # Prefer JOINED_RECORDING / JOINING / etc. over ENDED if any.
+    for object_id, state in bots:
+        # 4 = JOINED_RECORDING, 2/3 = JOINING/ADMITTED, 5 = JOINED_NOT_RECORDING
+        if state in (2, 3, 4, 5, 6):
+            return object_id
+    # Fall back to the most recent bot regardless of state — better to
+    # show a stale canvas than 404 on a meeting the user is mid-test.
+    if bots:
+        return bots[0][0]
+    return None
+
+
 def canvas_state_json(request: HttpRequest, bot_id: str) -> HttpResponse:
     return JsonResponse(snapshot(bot_id))
 

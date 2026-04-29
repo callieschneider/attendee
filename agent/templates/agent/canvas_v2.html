@@ -492,6 +492,13 @@ function App() {
     es.addEventListener("state", ev => {
       let payload; try { payload = JSON.parse(ev.data); } catch { return; }
       const evt = payload?.data || {};
+      // respawn_bot publishes this on the OLD bot's channel — the
+      // user's open tab follows automatically without a manual click.
+      if (evt.event === "moved" && evt.new_url) {
+        try { es.close(); } catch {}
+        window.location.replace(evt.new_url);
+        return;
+      }
       setSnap(prev => {
         if (!prev) return prev;
         const next = { ...prev };

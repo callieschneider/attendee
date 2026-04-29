@@ -145,13 +145,48 @@ def _respawn_bot(inp: dict, ctx: dict) -> dict:
     except Exception:
         log.exception("respawn_bot: old-bot leave failed (non-fatal) bot=%s", old_bot_id)
 
+    # Publish a `moved` event on the OLD bot's canvas channel so any
+    # browser tab still sitting on /agent/canvas/v2/<old>/ auto-
+    # migrates to the new URL without the user touching anything. The
+    # React app listens for this and does window.location.replace(...).
+    try:
+        from agent.canvas_v2 import state as _cstate
+        new_canvas_url = f"{app_url}/agent/canvas/v2/{new_bot_id}/"
+        _cstate.publish_state_event(old_bot_id, {
+            "event": "moved",
+            "new_bot_id": new_bot_id,
+            "new_url": new_canvas_url,
+        })
+    except Exception:
+        log.exception("respawn_bot: moved-event publish failed bot=%s", old_bot_id)
+
     new_canvas_url = f"{app_url}/agent/canvas/v2/{new_bot_id}/"
+
+    # Build a stable per-meeting URL too — survives future respawns
+    # without the agent having to call respawn_bot again. Extract the
+    # last path component of the meeting URL.
+    stable_url = ""
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(meeting_url).path.strip("/").split("/")[-1]
+        if path:
+            stable_url = f"{app_url}/agent/canvas/v2/m/{path}/"
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "old_bot_id": old_bot_id,
         "new_bot_id": new_bot_id,
         "canvas_url": new_canvas_url,
+        "stable_canvas_url": stable_url,
         "meeting_url": meeting_url,
+        "note": (
+            "The old canvas tab will auto-redirect to the new bot. "
+            "Use stable_canvas_url for a link that survives future "
+            "respawns. Speak/post the actual URL value, NOT the "
+            "literal text 'canvas_url' or '[link]'."
+        ),
     }
 
 

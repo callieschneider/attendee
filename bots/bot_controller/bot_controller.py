@@ -1133,8 +1133,17 @@ class BotController:
                 logger.info("canvas_chat: AGENT_APP_URL/ATTENDEE_API_KEY missing; skipping link post")
                 return
             bot_id = self.bot_in_db.object_id
-            canvas_url = f"{api_base}/agent/canvas/v2/{bot_id}/"
             agent_name = getattr(settings, "AGENT_NAME", "Clever Star")
+            # Prefer the stable per-meeting URL — survives respawns. Fall
+            # back to bot-specific URL if we can't extract a meet code.
+            canvas_url = f"{api_base}/agent/canvas/v2/{bot_id}/"
+            try:
+                from urllib.parse import urlparse
+                path_seg = urlparse(self.bot_in_db.meeting_url).path.strip("/").split("/")[-1]
+                if path_seg:
+                    canvas_url = f"{api_base}/agent/canvas/v2/m/{path_seg}/"
+            except Exception:
+                pass
             text = f"{agent_name} canvas: {canvas_url}"
 
             import threading
