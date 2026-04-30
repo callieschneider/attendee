@@ -95,6 +95,31 @@ def _bot_ever_recorded(bot_id: str) -> bool:
         return False
 
 
+def _bot_was_removed_by_user(bot_id: str) -> bool:
+    """
+    True if the bot's exit was caused by a user/host action rather
+    than an internal failure. Suppresses auto-respawn for:
+
+      - MEETING_ENDED (type 4): the host ended the meeting OR
+        kicked the bot. Either way, "the meeting is over for us"
+        and respawning is rude.
+      - LEAVE_REQUESTED (type 8): an explicit leave request was
+        issued — by the agent's own leave_meeting tool, by the
+        Attendee API, or by an automatic-leave rule. Re-spawning
+        in any of those cases would directly contradict the
+        request.
+    """
+    try:
+        from bots.models import BotEvent
+        return BotEvent.objects.filter(
+            bot__object_id=bot_id,
+            event_type__in=[4, 8],  # MEETING_ENDED, LEAVE_REQUESTED
+        ).exists()
+    except Exception:
+        log.exception("bot_supervisor: removed-by-user lookup failed bot=%s", bot_id)
+        return False
+
+
 def maybe_auto_respawn(bot_id: str) -> dict:
     """
     Called when a bot reaches `ended` state. Returns a small status
@@ -110,6 +135,11 @@ def maybe_auto_respawn(bot_id: str) -> dict:
             return {"action": "skip", "reason": "intentional leave"}
     except Exception:
         log.exception("bot_supervisor: is_intentional_leave failed bot=%s", bot_id)
+
+    # User/host action — meeting ended, bot kicked, or explicit
+    # leave-requested. Don't respawn against the user's wishes.
+    if _bot_was_removed_by_user(bot_id):
+        return {"action": "skip", "reason": "user/host removed bot"}
 
     # Did the bot ever actually start recording? If never, the join
     # itself failed and respawning will likely fail the same way.
